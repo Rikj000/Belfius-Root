@@ -1,7 +1,7 @@
 # Belfius Root
 
 <p align="left">
-    <a href="https://xdaforums.com/t/TODO">
+    <a href="https://xdaforums.com/t/release-v1-0-0-belfius-root.4680025/">
         <img src="https://img.shields.io/badge/XDA_Thread-Belfius_Root-orange" alt="XDA Developers - Belfius Root">
     </a> <a href="https://github.com/Rikj000/Belfius-Root/blob/development/LICENSE">
         <img src="https://img.shields.io/github/license/Rikj000/Belfius-Root?label=License&logo=gnu" alt="GNU General Public License">
@@ -16,7 +16,7 @@
     </a>
 </p>
 
-Simple Xposed module to support the Belfius app on Rooted devices!
+Simple Xposed module to support the [Belfius](https://play.google.com/store/apps/details?id=be.belfius.directmobile.android) app on Rooted devices!
 
 ## Installation
 1. Install [Magisk](https://topjohnwu.github.io/Magisk/install.html)
