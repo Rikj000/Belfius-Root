@@ -2,6 +2,10 @@ package be.belfius.directmobile.android.root;
 
 import static de.robv.android.xposed.XposedBridge.log;
 
+import android.os.Build;
+
+import java.io.File;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
@@ -15,12 +19,34 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
         if (!BELFIUS_PKG.equals(loadPackageParam.packageName)) return;
-        log("Hooking package " + BELFIUS_PKG);
 
+        int belfiusVersion = getPackageVersion(loadPackageParam);
+        log("Hooking package " + BELFIUS_PKG + " version: " + belfiusVersion);
+
+        // Check Belfius version
+        if (belfiusVersion >= 242742122) {
+            // Hook into root check of newer Belfius versions, tested on v24.3.1.0 (242742122)
+            findAndHookRootCheck(
+                    loadPackageParam,
+                    "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
+                    "b");
+        } else {
+            // Hook into root check of older Belfius versions, tested on v24.1.0 (240801805)
+            findAndHookRootCheck(
+                    loadPackageParam,
+                    "be.belfius.android.security.utils.RootUtils$isDeviceRooted$2",
+                    "b");
+        }
+    }
+
+    private void findAndHookRootCheck(
+            XC_LoadPackage.LoadPackageParam loadPackageParam,
+            String className,
+            String methodName) {
         XposedHelpers.findAndHookMethod(
-                "be.belfius.android.security.utils.RootUtils$isDeviceRooted$2",
+                className,
                 loadPackageParam.classLoader,
-                "b",
+                methodName,
                 new XC_MethodHook() {
 
                     @Override
@@ -28,5 +54,29 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
                         param.setResult(HAS_ROOT);
                     }
                 });
+    }
+
+    private static int getPackageVersion(XC_LoadPackage.LoadPackageParam loadPackageParam) {
+        int versionCode = 0;
+        File apkPath = new File(loadPackageParam.appInfo.sourceDir);
+        Class<?> pkgParserClass = XposedHelpers.findClass(
+                "android.content.pm.PackageParser", loadPackageParam.classLoader);
+
+        // Check Android version
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Handle Android 11 and above
+            Object pkgLite = XposedHelpers.callStaticMethod(
+                    pkgParserClass, "parsePackageLite", apkPath, 0);
+            versionCode = XposedHelpers.getIntField(pkgLite, "versionCode");
+        } else {
+            // Handle Android 10 and below
+            try {
+                Object parser = pkgParserClass.newInstance();
+                Object pkg = XposedHelpers.callMethod(parser, "parsePackage", apkPath, 0);
+                versionCode = XposedHelpers.getIntField(pkg, "mVersionCode");
+            } catch (Exception e) { log("Failed to get package version..."); }
+        }
+
+        return versionCode;
     }
 }
