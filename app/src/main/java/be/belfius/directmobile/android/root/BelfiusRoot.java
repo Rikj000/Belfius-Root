@@ -56,6 +56,25 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
                 });
     }
 
+    private boolean validateHookSupport(
+            String methodNameStr,
+            int currentVersion,
+            Integer minVersion,
+            Integer maxVersion) {
+
+        // Validate if the currentVersion supports the provided hook, skip if not
+        if (minVersion == null) { minVersion = 0; }
+        if (maxVersion == null) { maxVersion = 999999999; }
+        if (currentVersion < minVersion || currentVersion > maxVersion) {
+            log("Skipping hook " + methodNameStr + "...");
+            log ("Current version " + currentVersion + " not in hook support window " +
+                    "(min: " + minVersion + ", max: " + maxVersion + ")...");
+            return false;
+        }
+
+        return true;
+    }
+
     private static int getPackageVersion(XC_LoadPackage.LoadPackageParam loadPackageParam) {
         int versionCode = 0;
         File apkPath = new File(loadPackageParam.appInfo.sourceDir);
