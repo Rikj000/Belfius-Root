@@ -20,40 +20,74 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
         if (!BELFIUS_PKG.equals(loadPackageParam.packageName)) return;
 
+        // Fetch Belfius version
         int belfiusVersion = getPackageVersion(loadPackageParam);
         log("Hooking package " + BELFIUS_PKG + " version: " + belfiusVersion);
 
-        // Check Belfius version
-        if (belfiusVersion >= 242742122) {
-            // Hook into root check of newer Belfius versions, tested on v24.3.1.0 (242742122)
-            findAndHookRootCheck(
-                    loadPackageParam,
-                    "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
-                    "b");
-        } else {
-            // Hook into root check of older Belfius versions, tested on v24.1.0 (240801805)
-            findAndHookRootCheck(
-                    loadPackageParam,
-                    "be.belfius.android.security.utils.RootUtils$isDeviceRooted$2",
-                    "b");
-        }
+        // Main Hook - v24.3.1.0 (242742122) - v99.9.9.9 (999999999)
+        findAndHookRootCheck(
+                loadPackageParam,
+                "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
+                "b", belfiusVersion, 242742122, null);
+
+        // Legacy Hook - v00.0.0.0 (000000000) - v24.3.1.0 (242742122, exclusive)
+        findAndHookRootCheck(
+                loadPackageParam,
+                "be.belfius.android.security.utils.RootUtils$isDeviceRooted$2",
+                "b", belfiusVersion, null, 242742121);
     }
 
     private void findAndHookRootCheck(
             XC_LoadPackage.LoadPackageParam loadPackageParam,
             String className,
-            String methodName) {
-        XposedHelpers.findAndHookMethod(
-                className,
-                loadPackageParam.classLoader,
-                methodName,
-                new XC_MethodHook() {
+            String methodName,
+            int currentVersion,
+            Integer minVersion,
+            Integer maxVersion) {
 
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        param.setResult(HAS_ROOT);
-                    }
-                });
+        // Initialize method name string helper for logging
+        String methodNameStr = className + "." + methodName + "()";
+
+        // Validate if the currentVersion supports the provided hook, skip if not
+        if (!validateHookSupport(methodNameStr, currentVersion, minVersion, maxVersion)) { return; }
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    className,
+                    loadPackageParam.classLoader,
+                    methodName,
+                    new XC_MethodHook() {
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            param.setResult(HAS_ROOT);
+                        }
+                    });
+
+            log("Successfully hooked " + methodNameStr + "!");
+        } catch (Throwable t) {
+            log("Failed to hook " + methodNameStr + "...");
+            log(t);
+        }
+    }
+
+    private boolean validateHookSupport(
+            String methodNameStr,
+            int currentVersion,
+            Integer minVersion,
+            Integer maxVersion) {
+
+        // Validate if the currentVersion supports the provided hook, skip if not
+        if (minVersion == null) { minVersion = 0; }
+        if (maxVersion == null) { maxVersion = 999999999; }
+        if (currentVersion < minVersion || currentVersion > maxVersion) {
+            log("Skipping hook " + methodNameStr + "...");
+            log ("Current version " + currentVersion + " not in hook support window " +
+                    "(min: " + minVersion + ", max: " + maxVersion + ")...");
+            return false;
+        }
+
+        return true;
     }
 
     private static int getPackageVersion(XC_LoadPackage.LoadPackageParam loadPackageParam) {
@@ -74,7 +108,10 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
                 Object parser = pkgParserClass.newInstance();
                 Object pkg = XposedHelpers.callMethod(parser, "parsePackage", apkPath, 0);
                 versionCode = XposedHelpers.getIntField(pkg, "mVersionCode");
-            } catch (Exception e) { log("Failed to get package version..."); }
+            } catch (Throwable t) {
+                log("Failed to get package version...");
+                log(t);
+            }
         }
 
         return versionCode;
