@@ -74,7 +74,10 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
                 Object parser = pkgParserClass.newInstance();
                 Object pkg = XposedHelpers.callMethod(parser, "parsePackage", apkPath, 0);
                 versionCode = XposedHelpers.getIntField(pkg, "mVersionCode");
-            } catch (Exception e) { log("Failed to get package version..."); }
+            } catch (Throwable t) {
+                log("Failed to get package version...");
+                log(t);
+            }
         }
 
         return versionCode;
