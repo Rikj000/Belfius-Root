@@ -44,6 +44,25 @@ I grew agitated enough to do the research to write this module.
 
 Hope you'll enjoy this module and the ability to stay rooted!
 
+## Belfius Updates
+When the Belfius app updates,   
+there's a chance that the hooks of the Belfius-Root app break.
+
+To prevent this from happening, it's recommended to:
+- Disable auto updating of the Belfius app
+- First update the Belfius-Root app (reboot afterwards)
+- Secondly update the Belfius app **to the latest supported version by the Belfius-Root app!**
+
+## Belfius Downgrades
+If you accidentally updated to a version of the Belfius app which is not yet supported by Belfius-Root,   
+then you can still downgrade through [Aurora Store](https://gitlab.com/AuroraOSS/AuroraStore/-/releases) (FOSS Play Store frontend).
+
+To downgrade, simply:
+1. Search Belfius app in Aurora Store
+2. Triple dot icon => Manual Download
+3. Enter version code of the desired Belfius app version (Can be found under the [Belfius-Root releases](https://github.com/Rikj000/Belfius-Root/releases))
+4. Click check and the download should start.
+
 ## LSPosed Archived
 LSPosed indeed sadly has been archived.   
 However XPosed has continued on living in the past through new forks,   
