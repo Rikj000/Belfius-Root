@@ -24,11 +24,17 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         int belfiusVersion = getPackageVersion(loadPackageParam);
         log("Hooking package " + BELFIUS_PKG + " version: " + belfiusVersion);
 
-        // Main Hook - v24.4.0.0 (243321017) - v99.9.9.9 (999999999)
+        // Main Hook - v24.4.1.0 (250361401) - v99.9.9.9 (999999999)
         findAndHookRootCheck(
                 loadPackageParam,
                 "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
-                "a", belfiusVersion, 243321017, null);
+                "e", belfiusVersion, 250361401, null);
+
+        // Legacy Hook - v24.4.0.0 (243321017) - v24.4.1.0 (250361401, exclusive)
+        findAndHookRootCheck(
+                loadPackageParam,
+                "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
+                "a", belfiusVersion, 243321017, 250361400);
 
         // Legacy Hook - v24.3.1.0 (242742122) - v24.4.0.0 (243321017, exclusive)
         findAndHookRootCheck(
