@@ -2,10 +2,6 @@ package be.belfius.directmobile.android.root;
 
 import static de.robv.android.xposed.XposedBridge.log;
 
-import android.os.Build;
-
-import java.io.File;
-
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
