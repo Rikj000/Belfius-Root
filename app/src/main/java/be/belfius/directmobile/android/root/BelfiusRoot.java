@@ -2,10 +2,6 @@ package be.belfius.directmobile.android.root;
 
 import static de.robv.android.xposed.XposedBridge.log;
 
-import android.os.Build;
-
-import java.io.File;
-
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
@@ -17,6 +13,7 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     private static final Boolean HAS_ROOT = false;
 
     private static final String[] CLASS_NAMES = new String[] {
+            "o.bsS",
             "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
             "be.belfius.android.security.utils.RootUtils$isDeviceRooted$2"
     };
