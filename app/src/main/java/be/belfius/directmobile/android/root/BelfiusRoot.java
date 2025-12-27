@@ -13,6 +13,7 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     private static final Boolean HAS_ROOT = false;
 
     private static final String[] CLASS_NAMES = new String[] {
+            "o.bsS",
             "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
             "be.belfius.android.security.utils.RootUtils$isDeviceRooted$2"
     };
