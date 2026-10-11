@@ -31,3 +31,6 @@ This file tracks compatibility between the Belfius Mobile Android app and the Be
 - The Version Code can be used to download a specific APK via FOSS app stores like [Aurora Store](https://auroraoss.com/) (manual download by version code / specific version).
 
 
+
+### Testing note
+When verifying a new version with root bypass, also check the in-app "About this app" screen (top-right 3-dot menu → "over deze app") — it must show `Rooted: false` on a rooted device for the bypass to be considered fully effective.
