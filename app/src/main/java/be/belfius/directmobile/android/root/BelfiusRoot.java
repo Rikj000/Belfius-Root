@@ -26,8 +26,50 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     private volatile boolean packerBypassInstalled;
     private final java.util.concurrent.atomic.AtomicBoolean uiIntegrityDiggerArmed = new java.util.concurrent.atomic.AtomicBoolean();
     private volatile boolean detectionTargetsHooked;
+    private volatile boolean resolveSizeReadHooked;
+    private volatile boolean resolveSizeIconHooked;
     private final AtomicInteger classLoadLogs = new AtomicInteger(200);
     private final Map<Integer, String> resolverSeen = new ConcurrentHashMap<>();
+
+    /**
+     * Resolver ids the injected anti-tamper guard passes to
+     * o.dispatchWindowInsetsAnimationProgress.read(int) to obtain its three shared static int fields
+     * (1109753110="read" expected, -1546951913="IconCompatParcelizer" actual, 485759512="write"
+     * rolling state; 97097858 is the decoy get on the throw path). See session doc §3.
+     */
+    private static final int[] GUARD_FIELD_IDS = { 1109753110, -1546951913, 485759512, 97097858 };
+    /**
+     * The same four guard members as the build key (4th arg) of the resolver's
+     * IconCompatParcelizer(char,int,int,int,boolean,String,Class[]): that overload is what
+     * read(id) falls back to on a cache miss, and the build key is what identifies the declaring
+     * class (key -1414280701/-329306217 -> class 429, key 1247663106/-178082547 -> class 434).
+     */
+    private static final int[] GUARD_BUILD_KEYS = { -1414280701, 1247663106, -178082547, -329306217 };
+    /** Guard-field diagnostic: which handles/keys already reported (report each exactly once). */
+    private final java.util.Set<Integer> guardFieldSeen =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
+    private final java.util.Set<Integer> guardBuildSeen =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
+
+    /** The four guard resolver ids, named (see session doc §3). */
+    private static final int GUARD_ID_EXPECTED = 1109753110;   // o.cwx.read        (guard's i)
+    private static final int GUARD_ID_ACTUAL = -1546951913;     // o.cwC.IconCompatParcelizer (guard's i2)
+    private static final int GUARD_ID_SEED = 485759512;         // o.cwC.write       (guard's i3)
+    private static final int GUARD_ID_DECOY = 97097858;         // o.cwx.IconCompatParcelizer (Object, throw path)
+
+    /** Resolved guard fields, kept so ERRDIAG / the throw-site hook can dump their live values. */
+    private volatile Field guardFieldExpected;
+    private volatile Field guardFieldActual;
+    private volatile Field guardFieldSeed;
+    /** Throw-site classes already instrumented (once per class). */
+    private final java.util.Set<Class<?>> guardThrowSiteHooked =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Class<?>, Boolean>());
+    /** How many GUARDTRIPLE samples were written (guards run often — keep the log readable). */
+    private final AtomicInteger guardTripleLogs = new AtomicInteger();
+
+    /** Class objects already instrumented by the error-diagnostics hooks (once per loader). */
+    private final java.util.Set<Class<?>> errorDiagnosticsHooked =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Class<?>, Boolean>());
 
     private static final Class<?>[] NO_ARGS = new Class<?>[0];
     private static final Class<?>[] OBJECT_ARRAY_ARGS = new Class<?>[] { Object[].class };
@@ -60,6 +102,10 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
             new Target("o.ckg", "RemoteActionCompatParcelizer", NO_ARGS, HAS_ROOT),
             new Target("o.ckg", "read", NO_ARGS, HAS_ROOT),
             new Target("o.ckg", "AudioAttributesCompatParcelizer", NO_ARGS, 0)
+
+            // NOTE: "About this app" (o.resolveSize.o.resolveSizeAndState) is hooked
+            // separately in hookResolveSizeAndState() so we can log the app's own
+            // computed value before overriding it.
     };
 
     /**
@@ -70,6 +116,129 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
      * the audit looks byte-identical to a clean run. Many of the classes only exist after the dex
      * is injected, so this is (re)run from the classloader watcher.
      */
+    private void hookResolveSizeAndState(ClassLoader classLoader) {
+        if (!resolveSizeReadHooked) {
+            try {
+                Class<?> cls = XposedHelpers.findClass("o.resolveSizeAndState", classLoader);
+                if (cls != null) {
+                    XposedHelpers.findAndHookMethod(cls, "read", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            // Log what the app *itself* computed (this is the value the
+                            // "About this app" screen renders) and then override it.
+                            log("ROOTCHECK o.resolveSizeAndState.read() app-computed="
+                                    + param.getResult() + " -> forcing " + HAS_ROOT);
+                            param.setResult(HAS_ROOT);
+                        }
+                    });
+                    resolveSizeReadHooked = true;
+                    log("Successfully hooked o.resolveSizeAndState.read()!");
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (!resolveSizeIconHooked) {
+            try {
+                Class<?> cls = XposedHelpers.findClass("o.resolveSize", classLoader);
+                if (cls != null) {
+                    XposedHelpers.findAndHookMethod(cls, "IconCompatParcelizer", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            log("ROOTCHECK o.resolveSize.IconCompatParcelizer() app-computed="
+                                    + param.getResult() + " -> forcing " + HAS_ROOT);
+                            param.setResult(HAS_ROOT);
+                        }
+                    });
+                    resolveSizeIconHooked = true;
+                    log("Successfully hooked o.resolveSize.IconCompatParcelizer()!");
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * Diagnoses the generic "Algemene fout / Er is een fout opgetreden" dialog.
+     *
+     * The app maps every operation failure through o.getInstance.IconCompatParcelizer(...):
+     * known banking errors get a specific message, but ANY unmapped exception falls through to
+     * the generic pair (R.string "Algemene fout" + "Er is een fout opgetreden"). Because the app
+     * logs almost nothing to logcat, the only way to see WHY an operation failed is to observe the
+     * exception at that mapping point. These hooks only LOG (they never change the result), so they
+     * are side-effect free; they reveal the exact throwable class + stack for the failed tap.
+     */
+    private void hookErrorDiagnostics(ClassLoader classLoader) {
+        hookErrorClass(classLoader, "o.getInstance");
+    }
+
+    /**
+     * GUARD-SITE diagnostic (log-only): observe the injected anti-tamper guard entry/exit so the
+     * guard's inputs are captured at the exact moment of a failure — including the case where the
+     * throw never reaches o.getInstance. Nothing here changes the result; the safe-branch
+     * replication (à la COLWRITE) is a separate, deliberate step once the values are known.
+     */
+    private void hookGuardThrowSites(ClassLoader classLoader, String className, String methodName) {
+        Class<?> cls;
+        try {
+            cls = XposedHelpers.findClass(className, classLoader);
+        } catch (Throwable t) {
+            return; // not on this loader (yet)
+        }
+        if (!guardThrowSiteHooked.add(cls)) return;
+
+        try {
+            XposedBridge.hookAllMethods(cls, methodName, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    log("GUARD-SITE " + className + "#" + methodName + " ENTER " + guardTriple(className));
+                }
+
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Throwable t = param.getThrowable();
+                    log("GUARD-SITE " + className + "#" + methodName + " EXIT throwable="
+                            + (t == null ? "none" : t.getClass().getName() + ": " + t.getMessage())
+                            + " result=" + (t == null ? fmtVal(param.getResult()) : "-")
+                            + " on " + threadLabel());
+                    if (t != null) log(guardTriple(className + "#" + methodName + " threw"));
+                }
+            });
+            log("GUARD-SITE installed on " + className + "#" + methodName + " via " + classLoader);
+        } catch (Throwable t) {
+            log("GUARD-SITE failed on " + className + "#" + methodName + ": " + t);
+        }
+    }
+
+    private void hookErrorClass(ClassLoader classLoader, String className) {
+        Class<?> cls;
+        try {
+            cls = XposedHelpers.findClass(className, classLoader);
+        } catch (Throwable t) {
+            return; // not on this loader (yet)
+        }
+        if (!errorDiagnosticsHooked.add(cls)) return; // already instrumented this exact class
+
+        XC_MethodHook errLogger = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                for (Object a : param.args) {
+                    if (a instanceof Throwable) {
+                        Throwable t = (Throwable) a;
+                        log("ERRDIAG " + className + "#" + param.method.getName()
+                                + " exception=" + t.getClass().getName() + ": " + t.getMessage()
+                                + " on " + threadLabel());
+                        // Snapshot the guard's three static ints + every clock the hash feeds on,
+                        // so the failing run's exact inputs can be replayed offline (log-only).
+                        log(guardTriple("via=" + className + "#" + param.method.getName()));
+                        log(t);
+                    }
+                }
+            }
+        };
+        hookAllMethodsNamed(cls, "IconCompatParcelizer", errLogger);
+        log("ERRDIAG installed on " + className + " via " + classLoader);
+    }
+
     private void hookPackerBypass(ClassLoader classLoader) {
         if (packerBypassInstalled) return;
         Class<?> cBt;
@@ -82,12 +251,14 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
             return;
         }
 
-        // o.cBv.write throws RuntimeException(String.valueOf(i2)) when the audit's token is
-        // corrupted by a detected tamper flag, where objArr[1][0] (actual) differs from
-        // objArr[0][0] (expected). Normalize the actual to the expected BEFORE the body runs so the
-        // audit completes byte-identical to a clean run: no throw, no corrupted token, every static
-        // the app relies on set naturally. write is void; suppressing the exception afterwards via
-        // setResult is not reliable, so correct at the decision point instead.
+        // o.cBv.write throws RuntimeException(String.valueOf(i2)) when the audit's token slots differ.
+        // Slot semantics (verified live): objArr[0] carries the finder's measured int (dirty, =
+        // baseline ^ tamper code) and objArr[1] carries the CLEAN baseline the caller passed to
+        // cBt.read. So the clean direction is slot0 := slot1, NOT the other way round — folding the
+        // dirty value into slot1 is what used to reach o.cwx.read. With the cBt.read fix above the
+        // two slots are normally already equal and this never fires; it is the belt-and-braces
+        // fallback for any call path that bypasses that hook. write is void; suppressing the
+        // exception afterwards via setResult is not reliable, so correct at the decision point.
         // Deep instrumentation: dump the whole token contract before AND after so we can see which
         // slot / thread carries the fingerprint that later becomes a byte[] size.
         XC_MethodHook writeHook = new XC_MethodHook() {
@@ -98,11 +269,12 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
                 if (arg instanceof Object[] && ((Object[]) arg).length > 1) {
                     Object[] arr = (Object[]) arg;
                     if (arr[0] instanceof int[] && arr[1] instanceof int[]) {
-                        int[] expected = (int[]) arr[0];
-                        int[] actual = (int[]) arr[1];
-                        if (expected.length > 0 && actual.length > 0 && actual[0] != expected[0]) {
-                            log("TOKEN write tamper flag i2=" + actual[0] + " normalized to i=" + expected[0] + " on " + threadLabel());
-                            actual[0] = expected[0];
+                        int[] measured = (int[]) arr[0];
+                        int[] baseline = (int[]) arr[1];
+                        if (measured.length > 0 && baseline.length > 0 && measured[0] != baseline[0]) {
+                            log("TOKEN write slot0=" + measured[0] + " normalized to clean slot1="
+                                    + baseline[0] + " on " + threadLabel());
+                            measured[0] = baseline[0];
                         }
                     }
                 }
@@ -118,14 +290,20 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         };
         hookAllMethodsNamed(cBv, "write", writeHook);
 
-        // o.col$write.RemoteActionCompatParcelizer(cov$read) is a self-validating gate over the
-        // persisted audit record. On mismatch it runs a DELIBERATE kill block (new int[v4] where v4
-        // is the measured static "IconCompatParcelizer" int -> NegativeArraySizeException / OOM, then
-        // an always-failing aget[-1]). The only safe exit is the compare v7==v2, which then just
-        // stores the cov$read into this.AudioAttributesImplApi21Parcelizer and returns this.
-        // The statics are written DURING the audit, i.e. before our write-token hook runs, so the
-        // firebase/late replay of the record always faults. Replicate the safe branch in before:
-        // set the field, return this, and let the kill block never execute on any thread.
+        // o.col$write.RemoteActionCompatParcelizer(cov$read) is a FOURTH copy of the same RASP
+        // check as aYE/col$write-guard: it resolves o.cwx.read (i), o.cwC.IconCompatParcelizer (i2),
+        // o.cwC.write (i3), rolls H(i3, i2, col_env((int) uptimeMillis())) and runs a DELIBERATE kill
+        // block when H != o.cwx.read (new int[i2] with i2 = o.cwC.IconCompatParcelizer -> OOM /
+        // NegativeArraySizeException, then an always-failing aget[-1]). The pass path just stores the
+        // cov$read into this.AudioAttributesImplApi21Parcelizer and returns this.
+        // It used to fire on every process because o.cwx.read was corrupt (session doc §9); since the
+        // cBt.read fix the stored value equals the recomputed H again. Verified offline against live
+        // values from pid 24859: col_env's decoy term hashes to the SAME constant 3825025452 as the
+        // producer and aYE, and H(cwC.write, cwC.IconCompatParcelizer, col_env) = -828208786 =
+        // the live o.cwx.read. So the gate now passes on its own.
+        // Neutralize ONLY if the recomputed verdict says the gate would still fault (belt and
+        // braces: an OOM here would kill the Firebase worker), otherwise let the real body run so
+        // the log records a natural pass.
         try {
             final Class<?> colWrite = XposedHelpers.findClass("o.col$write", classLoader);
             final Field field = XposedHelpers.findField(colWrite, "AudioAttributesImplApi21Parcelizer");
@@ -146,6 +324,15 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
                     }
                     log(sb.toString());
                     if (!covReadOverload) return;
+                    int[] v = new int[2];
+                    int verdict = colGateVerdict(v);   // 1 = pass, -1 = would fault, 0 = unknown
+                    log("COLWRITE VERDICT " + (verdict == 1 ? "pass" : verdict == -1 ? "FAIL" : "unknown")
+                            + " recomputedH=" + v[0] + " o.cwx.read=" + v[1] + " on " + threadLabel());
+                    if (verdict == 1) {
+                        // Natural path: the original body will compare equal and take the safe
+                        // branch itself. Do not interfere; afterHookedMethod records the result.
+                        return;
+                    }
                     Object thisObject = param.thisObject;
                     Object covRead = param.args[0];
                     field.set(thisObject, covRead);
@@ -198,18 +385,64 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
                 Object res = param.getResult();
                 if (!(res instanceof Object[])) return;
                 Object[] o = (Object[]) res;
-                if (o.length < 2 || !(o[1] instanceof String[])) return;
+                if (o.length < 2 || !(o[0] instanceof int[]) || !(o[1] instanceof String[])) return;
                 String[] strs = (String[]) o[1];
+                // CAREAD: o.cBt.read(JI)[Object] ends with `xor-int/2addr v0, v2; aput v0, int[1], 0`
+                // i.e. returned int = computed ^ (int) args[1]. Exactly one of those two operands is
+                // the CLEAN baseline a clean device returns (839523105 in this run, since clinit's
+                // hash used it); the other carries the tamper code (7). Log both + the three cwC
+                // statics so the surviving operand can be identified unambiguously. Log only.
+                int measured = ((int[]) o[0]).length > 0 ? ((int[]) o[0])[0] : Integer.MIN_VALUE;
+                StringBuilder sb = new StringBuilder("CAREAD measured=" + measured);
+                if (param.args != null && param.args.length > 0 && param.args[0] instanceof Long) {
+                    sb.append(" flags=0x").append(Long.toHexString((Long) param.args[0]));
+                }
+                if (param.args != null && param.args.length > 1 && param.args[1] instanceof Integer) {
+                    int a1 = ((Integer) param.args[1]).intValue();
+                    sb.append(" arg1=").append(a1)
+                      .append(" measured^arg1=").append(measured ^ a1);
+                }
+                sb.append(" sigs=").append(strs.length).append(" on ").append(threadLabel());
+                try {
+                    Class<?> cwC = XposedHelpers.findClass("o.cwC", classLoader);
+                    sb.append(" | cwC.IconCompatParcelizer=")
+                      .append(XposedHelpers.getStaticIntField(cwC, "IconCompatParcelizer"))
+                      .append(" cwC.read=").append(XposedHelpers.getStaticIntField(cwC, "read"))
+                      .append(" cwC.write=").append(XposedHelpers.getStaticIntField(cwC, "write"));
+                } catch (Throwable ignored) {}
+                // o.cwx.read through the already-resolved Field only (no class loading / <clinit>
+                // triggered from inside this hook).
+                if (guardFieldExpected != null) {
+                    sb.append(" | o.cwx.read=").append(guardInt(guardFieldExpected));
+                }
+                log(sb.toString());
                 if (strs.length == 0) return;
                 log("TOKEN read finding stripped on " + threadLabel()
                         + " was=" + shortVal(o[1]) + " int=" + shortVal(o[0]));
                 o[1] = new String[0];
-                // NOTE: do NOT zero the measured int (o[0][0]). Retained its value causes the
-                // col$write:224 kill block to be ENTERED, but that path is now neutralized by the
-                // safe-branch replica above. Zeroing it instead breaks a later legit use: the app
-                // divides by this token value during UI layout (o.bII.hashCode(:132)) and dies with
-                // ArithmeticException: divide by zero. The finder int is also shared with the
-                // write token's expected slot, so zeroing here corrupts both.
+                // FIX AT THE SOURCE. o.cBt.read(JI)[Object] ends with `xor-int/2addr v0, v2` /
+                // `aput v0, int[1], 0`, i.e. it returns int[1]{ computed ^ (int) args[1] } where
+                // args[1] is the CLEAN baseline the caller passed in and `computed` is 0 on a clean
+                // run and the tamper code (7 here) when the scan flags a finding. Verified live:
+                //   measured=221443188 arg1=221443187 measured^arg1=7 sigs=1   (dirty)
+                //   measured=221443187 arg1=221443187 measured^arg1=0 sigs=0   (clean)
+                // cwx.write folds that dirty int into o.cwx.read (read = cwuVar.read), so
+                // o.cwx.read stops equalling the guard's recomputed H(seed, cwC.IconCompatParcelizer)
+                // and EVERY injected anti-tamper guard throws -> generic "Algemene fout" dialog.
+                // Proven numerically on pids 17373 and 23116: H(seed, clean) == the value at
+                // <clinit>, H(seed, dirty) == the value after cwx.write.
+                // Restore exactly what a clean device returns: args[1]. NOT zeroing it — the app
+                // divides by this token during UI layout (o.bII.hashCode:132) and zeroing would
+                // raise ArithmeticException; the clean baseline is non-zero like a clean run.
+                if (param.args != null && param.args.length > 1 && param.args[1] instanceof Integer) {
+                    int clean = ((Integer) param.args[1]).intValue();
+                    int[] m = (int[]) o[0];
+                    if (m.length > 0 && m[0] != clean) {
+                        log("FIX cBt.read measured=" + m[0] + " -> clean baseline " + clean
+                                + " (tamper code " + (m[0] ^ clean) + ") on " + threadLabel());
+                        m[0] = clean;
+                    }
+                }
             }
         });
 
@@ -372,6 +605,150 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
      *  stackTraceToString helpers were removed after the A/B test identified them as the
      *  desync trigger for setShowDividerHorizontal.onCreate's lifecycle counters. */
 
+    /** True if the resolver handle is one of the four ids the injected anti-tamper guard reads. */
+    private static boolean isGuardFieldId(int id) {
+        for (int v : GUARD_FIELD_IDS) if (v == id) return true;
+        return false;
+    }
+
+    /** True if the build key identifies a member the injected anti-tamper guard reads. */
+    private static boolean isGuardBuildKey(int key) {
+        for (int v : GUARD_BUILD_KEYS) if (v == key) return true;
+        return false;
+    }
+
+    /**
+     * GUARDFIELD diagnostic: identify the owner of a guard field — declaring class, member name,
+     * static/type and the value it currently holds. Log only; nothing is mutated, so this cannot
+     * change the app's behaviour. It turned out the "normalize the three statics" theory was wrong
+     * (o.cwx.read is a DERIVED hash), but this is what proved the ownerships: o.cwx.read /
+     * o.cwC.IconCompatParcelizer / o.cwC.write. See session doc §9.5.
+     */
+    private static void logGuardField(String via, Object member) {
+        if (!(member instanceof Field)) {
+            log("GUARDFIELD " + via + " -> " + member
+                    + (member == null ? " (not resolved yet)" : " [" + member.getClass().getName() + "]"));
+            return;
+        }
+        Field f = (Field) member;
+        String who;
+        try {
+            who = f.getDeclaringClass().getName() + "." + f.getName() + " ["
+                    + (Modifier.isStatic(f.getModifiers()) ? "static " : "") + f.getType().getName() + "]";
+        } catch (Throwable t) {
+            who = "<?> [" + t + "]";
+        }
+        String value;
+        try {
+            value = String.valueOf(f.getInt(null));
+        } catch (Throwable t) {
+            value = "<" + t + ">";
+        }
+        log("GUARDFIELD " + via + " -> " + who + " value=" + value);
+    }
+
+    /** Remember the resolved Field for each guard slot so the triple can be dumped later. */
+    private void noteGuardField(int id, Object member) {
+        if (!(member instanceof Field)) return;
+        if (id == GUARD_ID_EXPECTED) guardFieldExpected = (Field) member;
+        else if (id == GUARD_ID_ACTUAL) guardFieldActual = (Field) member;
+        else if (id == GUARD_ID_SEED) guardFieldSeed = (Field) member;
+    }
+
+    /** Reverse of the builder's 4th arg (build key) -> the equivalent resolver id. */
+    private static int guardIdForKey(int key) {
+        switch (key) {
+            case -1414280701: return GUARD_ID_EXPECTED;
+            case 1247663106: return GUARD_ID_ACTUAL;
+            case -178082547: return GUARD_ID_SEED;
+            case -329306217: return GUARD_ID_DECOY;
+            default: return 0;
+        }
+    }
+
+    private static int guardInt(Field f) {
+        if (f == null) return Integer.MIN_VALUE;
+        try {
+            return f.getInt(null);
+        } catch (Throwable t) {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    /**
+     * The packer's rolling hash pass, byte for byte as emitted by the dex:
+     * {@code for (k = 0; k != 8; k++) i = (((((int)(j >> k)) & 255) + (i << 6)) + (i << 16)) - i;}.
+     * Only bits 0..14 of {@code jval} ever reach the accumulator.
+     */
+    private static int hashPass(int seed, long jval) {
+        int i = seed;
+        for (int k = 0; k < 8; k++) {
+            int b = (int) ((jval >> k) & 0xFF);
+            i = b + ((i << 6) + (i << 16) - i);
+        }
+        return i;
+    }
+
+    /** o.col$write's environment term (its copy of the uptime decoy mix). Long math wraps like DEX. */
+    private static long colGateEnv(int uptimeMillis) {
+        long A = 2462369367754759110L, B = 1352544697600341417L, C = 3669650830335639535L;
+        long j2 = -1L;
+        long ju = uptimeMillis;
+        long j3 = A ^ j2;
+        long j4 = ju ^ j2;
+        long j5 = 904L;
+        long j6 = B ^ j2;
+        return (905L * A)
+                + ((-903L) * B)
+                + ((-1808L) * (((j3 | ju) ^ j2) | ((j4 | B) ^ j2)))
+                + (((((j3 | j6) | ju) ^ j2) | ((j4 | C) ^ j2)) * j5)
+                + (j5 * (((j4 | A) ^ j2) | ((j6 | ju) ^ j2) | ((j3 | B) ^ j2)));
+    }
+
+    /**
+     * Replay o.col$write.RemoteActionCompatParcelizer(cov.read)'s verdict before letting it run:
+     * {@code H(o.cwC.write, o.cwC.IconCompatParcelizer, colGateEnv((int) uptimeMillis()))} vs
+     * {@code o.cwx.read}. Returns 1 when the gate compares equal (natural pass), -1 when it would
+     * enter the kill block, 0 when the guard Fields are not resolved yet. out[0]=recomputed H,
+     * out[1]=stored o.cwx.read.
+     */
+    private int colGateVerdict(int[] out) {
+        out[0] = Integer.MIN_VALUE;
+        out[1] = guardInt(guardFieldExpected);
+        if (guardFieldExpected == null || guardFieldActual == null || guardFieldSeed == null) return 0;
+        int actual = guardInt(guardFieldActual);
+        int seed = guardInt(guardFieldSeed);
+        try {
+            long env = colGateEnv((int) android.os.SystemClock.uptimeMillis());
+            out[0] = hashPass(hashPass(seed, (long) actual), env);
+            return out[0] == out[1] ? 1 : -1;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
+     * GUARDTRIPLE: the live values the injected anti-tamper guard compares (expected i / actual i2 /
+     * seed i3) together with every clock the guards and their producer feed into the rolling hash.
+     * Log only — this is what established the hash model (session doc §9.2).
+     *
+     * Producer (cwx &lt;clinit&gt;/write): o.cwx.read = H(o.cwC.write, o.cwC.IconCompatParcelizer,
+     * (int) SystemClock.uptimeMillis()). Guards recompute H with their own environment term
+     * (aYE: Process.getStartElapsedRealtime(); col$write: SystemClock.uptimeMillis()); all of those
+     * environment terms hash to the SAME constant 3825025452, i.e. they are decoys.
+     */
+    private String guardTriple(String why) {
+        return "GUARDTRIPLE[" + why
+                + " expected(i)=" + guardInt(guardFieldExpected)
+                + " actual(i2)=" + guardInt(guardFieldActual)
+                + " seed(i3)=" + guardInt(guardFieldSeed)
+                + " uptimeMillis=" + android.os.SystemClock.uptimeMillis()
+                + " elapsedRealtime=" + android.os.SystemClock.elapsedRealtime()
+                + " startElapsedRealtime=" + android.os.Process.getStartElapsedRealtime()
+                + " wallClock=" + System.currentTimeMillis()
+                + " thread=" + Thread.currentThread().getName() + "]";
+    }
+
     private static String fmtVal(Object v) {
         if (v == null) return "null";
         if (v instanceof Number || v instanceof Boolean || v instanceof Character) return v.toString();
@@ -522,6 +899,10 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         int detectionHooks = hookDetectionTargets(classLoader);
 
         hookPackerBypass(classLoader);
+        hookErrorDiagnostics(classLoader);
+        // The generic-error throw site lives in classes3.dex (base loader): observe it directly so
+        // the guard's inputs are logged even if the exception never reaches o.getInstance.
+        hookGuardThrowSites(classLoader, "o.aYE", "setVisibility");
 
         // The whole real app (main code + anti-Xposed audit dex) is injected inside
         // attachBaseContext, after this callback runs. Watch the classloader: the moment a packer
@@ -555,6 +936,20 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
                                         installing = true;
                                         try {
                                             hookDetectionTargets(classLoader);
+                                        } finally {
+                                            installing = false;
+                                        }
+                                    } else if (name.startsWith("o.getInstance")) {
+                                        installing = true;
+                                        try {
+                                            hookErrorDiagnostics(classLoader);
+                                        } finally {
+                                            installing = false;
+                                        }
+                                    } else if (name.startsWith("o.aYE")) {
+                                        installing = true;
+                                        try {
+                                            hookGuardThrowSites(classLoader, "o.aYE", "setVisibility");
                                         } finally {
                                             installing = false;
                                         }
@@ -620,6 +1015,23 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             Object result = param.getResult();
+                            // GUARDFIELD diagnostic: report the four handles the injected
+                            // anti-tamper guard uses, so we learn which class owns the three shared
+                            // static int fields it validates (log-only, no result is modified).
+                            int guardHandle = ((Integer) param.args[0]).intValue();
+                            if (isGuardFieldId(guardHandle)) {
+                                noteGuardField(guardHandle, result);
+                                if (guardFieldSeen.add(guardHandle)) {
+                                    logGuardField("read(" + guardHandle + ")", result);
+                                }
+                                // The seed (i3) is read LAST inside every guard invocation, so at
+                                // that point expected/actual/seed are all known: sample the triple
+                                // plus every clock the hash feeds (capped — guards run often).
+                                if (guardHandle == GUARD_ID_SEED
+                                        && guardTripleLogs.getAndIncrement() < 10) {
+                                    log(guardTriple("resolver-seed-read"));
+                                }
+                            }
                             if (result instanceof Member) {
                                 Member member = (Member) result;
                                 Class<?> dc = member.getDeclaringClass();
@@ -640,6 +1052,8 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
                                     if (!packerBypassInstalled) {
                                         hookPackerBypass(loader);
                                     }
+                                    hookResolveSizeAndState(loader);
+                                    hookErrorDiagnostics(loader);
                                     if (!detectionTargetsHooked) {
                                         hookDetectionTargets(loader);
                                     }
@@ -655,6 +1069,32 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
             log("Resolver watcher installed.");
         } catch (Throwable t) {
             log("Resolver watcher failed: " + t);
+        }
+
+        // GUARDFIELD diagnostic (log-only, temporary): read(id) returns null until the member is
+        // cached, and on that miss the guard calls the builder below, which resolves the DECLARING
+        // CLASS from (c,i,i2) and the member from its name. Observe only the four keys the guard
+        // uses, so the app's (very hot) reflection traffic is unaffected.
+        try {
+            XposedHelpers.findAndHookMethod("o.dispatchWindowInsetsAnimationProgress", classLoader,
+                    "IconCompatParcelizer",
+                    char.class, int.class, int.class, int.class, boolean.class, String.class,
+                    Class[].class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Object k = param.args[3];
+                            if (!(k instanceof Integer)) return;
+                            int key = ((Integer) k).intValue();
+                            if (!isGuardBuildKey(key)) return;
+                            noteGuardField(guardIdForKey(key), param.getResult());
+                            if (!guardBuildSeen.add(key)) return;
+                            logGuardField("build(key=" + key + ", name=" + param.args[5] + ")",
+                                    param.getResult());
+                        }
+                    });
+            log("Guard-field builder watcher installed.");
+        } catch (Throwable t) {
+            log("Guard-field builder watcher failed: " + t);
         }
 
         // The getDeclaredMethods / getDeclaredMethod / getMethod observers once revealed which o.*
