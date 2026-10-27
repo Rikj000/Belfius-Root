@@ -1,0 +1,5 @@
+# Modern (libxposed) module configuration. Replaces the legacy xposedminversion metadata.
+# 102 = the API version Vector 2.2 implements; modules targeting 102 may not call the legacy
+# de.robv.android.xposed APIs, which this module no longer uses at all.
+minApiVersion=102
+targetApiVersion=102

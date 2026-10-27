@@ -1,3 +1,9 @@
 <resources>
     <string name="app_name">Belfius Root</string>
+    <string name="app_description">Support the Belfius app on rooted devices. Modern (libxposed) module.</string>
+    <string name="settings_title">Belfius Root</string>
+    <string name="settings_debug_title">Debug logging</string>
+    <string name="settings_debug_summary">Print the module\'s diagnostics to logcat: guard values, audit tokens and stack traces, plus extra sanity checks on the UI layout path. Off by default — the diagnostics run inside the packer\'s audit, which the app executes on the main thread on some screens, so leaving this on can make navigation feel slow.</string>
+    <string name="settings_restart_hint">Takes effect the next time the Belfius app starts. From a shell you can also flip it with:\nadb shell am broadcast -a be.belfius.directmobile.android.root.SET_DEBUG --ez debug true</string>
+    <string name="settings_service_unreachable">Could not reach the Xposed framework service. Make sure the module is enabled and scoped in Vector, then reopen this screen. The value on screen may be stale.</string>
 </resources>

@@ -1,15 +1,10 @@
 package be.belfius.directmobile.android.root;
 
-import static de.robv.android.xposed.XposedBridge.log;
-
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.util.Log;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
-
+import java.lang.reflect.Executable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Member;
 import java.lang.reflect.Method;
@@ -18,10 +13,51 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
+
+/**
+ * The module's entry point, written against the modern libxposed API (API 102).
+ *
+ * <p>The framework instantiates this class once per loaded module generation in a process and then
+ * calls {@link #onModuleLoaded} / {@link #onPackageLoaded}. Hooks are installed through
+ * {@code hook(Executable).intercept(Hooker)}: the interceptor receives a {@link XposedInterface.Chain}
+ * instead of a mutable parameter bag, and skips the original by simply not calling
+ * {@code chain.proceed()}.
+ */
 /** @noinspection unused*/
-public class BelfiusRoot implements IXposedHookLoadPackage {
+public class BelfiusRoot extends XposedModule {
+    private static final String TAG = "BelfiusRoot";
     private static final String BELFIUS_PKG = "be.belfius.directmobile.android";
     private static final Boolean HAS_ROOT = false;
+
+    /** The instance the framework created for this process; used by the static log helpers. */
+    private static volatile BelfiusRoot instance;
+
+    /**
+     * The process name captured in {@link #onModuleLoaded}. The legacy
+     * {@code LoadPackageParam.processName} drove the one-off main-process verdict, but the modern
+     * {@link XposedModuleInterface.PackageLoadedParam} no longer exposes it.
+     */
+    private static volatile String processName;
+
+    /**
+     * Diagnostics switch, read once per process from the module's "debug" setting
+     * (see {@link ModuleSettings} / {@link SettingsActivity}).
+     *
+     * <p>When OFF (the default) every diagnostic hook is skipped at install time, {@link #log} is a
+     * no-op and the cheap-early-return helpers ({@link #threadLabel()}, {@link #guardTriple}) do no
+     * work at all, so the module adds nothing measurable to hot paths. The functional fixes
+     * (o.cBt.read restore, o.cBv.write slot normalisation, the hash-check neutralisers, the root
+     * detection overrides) are never gated.
+     *
+     * <p>This matters because the packer's audit runs on the MAIN THREAD from
+     * {@code BelfiusRecyclerView.dispatchDraw} on some screens; with diagnostics on, every audit call
+     * emitted six log lines, each capturing a full stack trace via {@link #threadLabel()} before
+     * being handed to the framework log.
+     */
+    private static volatile boolean DEBUG;
 
     private volatile boolean packerBypassInstalled;
     private final java.util.concurrent.atomic.AtomicBoolean uiIntegrityDiggerArmed = new java.util.concurrent.atomic.AtomicBoolean();
@@ -119,17 +155,15 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     private void hookResolveSizeAndState(ClassLoader classLoader) {
         if (!resolveSizeReadHooked) {
             try {
-                Class<?> cls = XposedHelpers.findClass("o.resolveSizeAndState", classLoader);
+                Class<?> cls = findClass("o.resolveSizeAndState", classLoader);
                 if (cls != null) {
-                    XposedHelpers.findAndHookMethod(cls, "read", new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            // Log what the app *itself* computed (this is the value the
-                            // "About this app" screen renders) and then override it.
-                            log("ROOTCHECK o.resolveSizeAndState.read() app-computed="
-                                    + param.getResult() + " -> forcing " + HAS_ROOT);
-                            param.setResult(HAS_ROOT);
-                        }
+                    Method m = cls.getDeclaredMethod("read");
+                    after(m, (chain, result) -> {
+                        // Log what the app *itself* computed (this is the value the
+                        // "About this app" screen renders) and then override it.
+                        log("ROOTCHECK o.resolveSizeAndState.read() app-computed="
+                                + result + " -> forcing " + HAS_ROOT);
+                        return HAS_ROOT;
                     });
                     resolveSizeReadHooked = true;
                     log("Successfully hooked o.resolveSizeAndState.read()!");
@@ -139,15 +173,13 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         }
         if (!resolveSizeIconHooked) {
             try {
-                Class<?> cls = XposedHelpers.findClass("o.resolveSize", classLoader);
+                Class<?> cls = findClass("o.resolveSize", classLoader);
                 if (cls != null) {
-                    XposedHelpers.findAndHookMethod(cls, "IconCompatParcelizer", new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            log("ROOTCHECK o.resolveSize.IconCompatParcelizer() app-computed="
-                                    + param.getResult() + " -> forcing " + HAS_ROOT);
-                            param.setResult(HAS_ROOT);
-                        }
+                    Method m = cls.getDeclaredMethod("IconCompatParcelizer");
+                    after(m, (chain, result) -> {
+                        log("ROOTCHECK o.resolveSize.IconCompatParcelizer() app-computed="
+                                + result + " -> forcing " + HAS_ROOT);
+                        return HAS_ROOT;
                     });
                     resolveSizeIconHooked = true;
                     log("Successfully hooked o.resolveSize.IconCompatParcelizer()!");
@@ -168,6 +200,7 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
      * are side-effect free; they reveal the exact throwable class + stack for the failed tap.
      */
     private void hookErrorDiagnostics(ClassLoader classLoader) {
+        if (!DEBUG) return; // pure diagnostics: never installed when the toggle is off
         hookErrorClass(classLoader, "o.getInstance");
     }
 
@@ -178,30 +211,32 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
      * replication (à la COLWRITE) is a separate, deliberate step once the values are known.
      */
     private void hookGuardThrowSites(ClassLoader classLoader, String className, String methodName) {
+        if (!DEBUG) return; // log-only diagnostic
         Class<?> cls;
         try {
-            cls = XposedHelpers.findClass(className, classLoader);
+            cls = findClass(className, classLoader);
         } catch (Throwable t) {
             return; // not on this loader (yet)
         }
         if (!guardThrowSiteHooked.add(cls)) return;
 
         try {
-            XposedBridge.hookAllMethods(cls, methodName, new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    log("GUARD-SITE " + className + "#" + methodName + " ENTER " + guardTriple(className));
+            hookAllMethodsNamed(cls, methodName, chain -> {
+                log("GUARD-SITE " + className + "#" + methodName + " ENTER " + guardTriple(className));
+                Object r = null;
+                Throwable t = null;
+                try {
+                    r = chain.proceed();
+                } catch (Throwable e) {
+                    t = e;
                 }
-
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    Throwable t = param.getThrowable();
-                    log("GUARD-SITE " + className + "#" + methodName + " EXIT throwable="
-                            + (t == null ? "none" : t.getClass().getName() + ": " + t.getMessage())
-                            + " result=" + (t == null ? fmtVal(param.getResult()) : "-")
-                            + " on " + threadLabel());
-                    if (t != null) log(guardTriple(className + "#" + methodName + " threw"));
-                }
+                log("GUARD-SITE " + className + "#" + methodName + " EXIT throwable="
+                        + (t == null ? "none" : t.getClass().getName() + ": " + t.getMessage())
+                        + " result=" + (t == null ? fmtVal(r) : "-")
+                        + " on " + threadLabel());
+                if (t != null) log(guardTriple(className + "#" + methodName + " threw"));
+                if (t != null) throw t;
+                return r;
             });
             log("GUARD-SITE installed on " + className + "#" + methodName + " via " + classLoader);
         } catch (Throwable t) {
@@ -212,30 +247,27 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     private void hookErrorClass(ClassLoader classLoader, String className) {
         Class<?> cls;
         try {
-            cls = XposedHelpers.findClass(className, classLoader);
+            cls = findClass(className, classLoader);
         } catch (Throwable t) {
             return; // not on this loader (yet)
         }
         if (!errorDiagnosticsHooked.add(cls)) return; // already instrumented this exact class
 
-        XC_MethodHook errLogger = new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                for (Object a : param.args) {
-                    if (a instanceof Throwable) {
-                        Throwable t = (Throwable) a;
-                        log("ERRDIAG " + className + "#" + param.method.getName()
-                                + " exception=" + t.getClass().getName() + ": " + t.getMessage()
-                                + " on " + threadLabel());
-                        // Snapshot the guard's three static ints + every clock the hash feeds on,
-                        // so the failing run's exact inputs can be replayed offline (log-only).
-                        log(guardTriple("via=" + className + "#" + param.method.getName()));
-                        log(t);
-                    }
+        hookAllMethodsNamed(cls, "IconCompatParcelizer", chain -> {
+            for (Object a : chain.getArgs()) {
+                if (a instanceof Throwable) {
+                    Throwable t = (Throwable) a;
+                    log("ERRDIAG " + className + "#" + chain.getExecutable().getName()
+                            + " exception=" + t.getClass().getName() + ": " + t.getMessage()
+                            + " on " + threadLabel());
+                    // Snapshot the guard's three static ints + every clock the hash feeds on,
+                    // so the failing run's exact inputs can be replayed offline (log-only).
+                    log(guardTriple("via=" + className + "#" + chain.getExecutable().getName()));
+                    log(t);
                 }
             }
-        };
-        hookAllMethodsNamed(cls, "IconCompatParcelizer", errLogger);
+            return chain.proceed();
+        });
         log("ERRDIAG installed on " + className + " via " + classLoader);
     }
 
@@ -244,8 +276,8 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         Class<?> cBt;
         Class<?> cBv;
         try {
-            cBt = XposedHelpers.findClass("o.cBt", classLoader);
-            cBv = XposedHelpers.findClass("o.cBv", classLoader);
+            cBt = findClass("o.cBt", classLoader);
+            cBv = findClass("o.cBv", classLoader);
         } catch (Throwable t) {
             log("Packer bypass deferred, class not loadable yet: " + t);
             return;
@@ -261,34 +293,39 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         // exception afterwards via setResult is not reliable, so correct at the decision point.
         // Deep instrumentation: dump the whole token contract before AND after so we can see which
         // slot / thread carries the fingerprint that later becomes a byte[] size.
-        XC_MethodHook writeHook = new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                Object arg = param.args[0];
+        hookAllMethodsNamed(cBv, "write", chain -> {
+            Object arg = chain.getArg(0);
+            if (DEBUG) {
                 log("TOKEN write(before) on " + threadLabel() + " " + tokenDump((Object[]) arg));
-                if (arg instanceof Object[] && ((Object[]) arg).length > 1) {
-                    Object[] arr = (Object[]) arg;
-                    if (arr[0] instanceof int[] && arr[1] instanceof int[]) {
-                        int[] measured = (int[]) arr[0];
-                        int[] baseline = (int[]) arr[1];
-                        if (measured.length > 0 && baseline.length > 0 && measured[0] != baseline[0]) {
+            }
+            if (arg instanceof Object[] && ((Object[]) arg).length > 1) {
+                Object[] arr = (Object[]) arg;
+                if (arr[0] instanceof int[] && arr[1] instanceof int[]) {
+                    int[] measured = (int[]) arr[0];
+                    int[] baseline = (int[]) arr[1];
+                    if (measured.length > 0 && baseline.length > 0 && measured[0] != baseline[0]) {
+                        if (DEBUG) {
                             log("TOKEN write slot0=" + measured[0] + " normalized to clean slot1="
                                     + baseline[0] + " on " + threadLabel());
-                            measured[0] = baseline[0];
                         }
+                        measured[0] = baseline[0];
                     }
                 }
             }
-
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                if (param.args[0] instanceof Object[]) {
-                    log("TOKEN write(after) on " + threadLabel() + " " + tokenDump((Object[]) param.args[0])
-                            + " (throwable=" + (param.getThrowable() != null) + ")");
-                }
+            Object r = null;
+            Throwable t = null;
+            try {
+                r = chain.proceed();
+            } catch (Throwable e) {
+                t = e;
             }
-        };
-        hookAllMethodsNamed(cBv, "write", writeHook);
+            if (DEBUG && chain.getArg(0) instanceof Object[]) {
+                log("TOKEN write(after) on " + threadLabel() + " " + tokenDump((Object[]) chain.getArg(0))
+                        + " (throwable=" + (t != null) + ")");
+            }
+            if (t != null) throw t;
+            return r;
+        });
 
         // o.col$write.RemoteActionCompatParcelizer(cov$read) is a FOURTH copy of the same RASP
         // check as aYE/col$write-guard: it resolves o.cwx.read (i), o.cwC.IconCompatParcelizer (i2),
@@ -305,50 +342,61 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         // braces: an OOM here would kill the Firebase worker), otherwise let the real body run so
         // the log records a natural pass.
         try {
-            final Class<?> colWrite = XposedHelpers.findClass("o.col$write", classLoader);
-            final Field field = XposedHelpers.findField(colWrite, "AudioAttributesImplApi21Parcelizer");
-            hookAllMethodsNamed(colWrite, "RemoteActionCompatParcelizer", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    boolean covReadOverload = param.args != null && param.args.length == 1
-                            && param.args[0] != null
-                            && "o.cov$read".equals(param.args[0].getClass().getName());
+            final Class<?> colWrite = findClass("o.col$write", classLoader);
+            final Field field = findField(colWrite, "AudioAttributesImplApi21Parcelizer");
+            hookAllMethodsNamed(colWrite, "RemoteActionCompatParcelizer", chain -> {
+                Object[] args = chain.getArgs().toArray();
+                boolean covReadOverload = args.length == 1
+                        && args[0] != null
+                        && "o.cov$read".equals(args[0].getClass().getName());
+                if (DEBUG) {
                     StringBuilder sb = new StringBuilder("COLWRITE before on " + threadLabel()
-                            + " m=" + param.method.getName()
-                            + (isStatic((java.lang.reflect.Method) param.method) ? " (static)" : " (instance)")
-                            + " this=" + shortVal(param.thisObject));
-                    for (int i = 0; i < param.args.length; i++) {
-                        sb.append(" arg").append(i).append('=').append(param.args[i] == null
-                                ? "null" : param.args[i].getClass().getSimpleName() + "@"
-                                + System.identityHashCode(param.args[i]));
+                            + " m=" + ((Method) chain.getExecutable()).getName()
+                            + (isStatic((Method) chain.getExecutable()) ? " (static)" : " (instance)")
+                            + " this=" + shortVal(chain.getThisObject()));
+                    for (int i = 0; i < args.length; i++) {
+                        sb.append(" arg").append(i).append('=').append(args[i] == null
+                                ? "null" : args[i].getClass().getSimpleName() + "@"
+                                + System.identityHashCode(args[i]));
                     }
                     log(sb.toString());
-                    if (!covReadOverload) return;
+                }
+                if (covReadOverload) {
                     int[] v = new int[2];
                     int verdict = colGateVerdict(v);   // 1 = pass, -1 = would fault, 0 = unknown
-                    log("COLWRITE VERDICT " + (verdict == 1 ? "pass" : verdict == -1 ? "FAIL" : "unknown")
-                            + " recomputedH=" + v[0] + " o.cwx.read=" + v[1] + " on " + threadLabel());
-                    if (verdict == 1) {
-                        // Natural path: the original body will compare equal and take the safe
-                        // branch itself. Do not interfere; afterHookedMethod records the result.
-                        return;
+                    if (DEBUG) {
+                        log("COLWRITE VERDICT " + (verdict == 1 ? "pass" : verdict == -1 ? "FAIL" : "unknown")
+                                + " recomputedH=" + v[0] + " o.cwx.read=" + v[1] + " on " + threadLabel());
                     }
-                    Object thisObject = param.thisObject;
-                    Object covRead = param.args[0];
-                    field.set(thisObject, covRead);
-                    log("COLWRITE NEUTRALIZED on " + threadLabel() + " set this="
-                            + shortVal(thisObject) + " AudioAttributesImplApi21Parcelizer="
-                            + covRead.getClass().getSimpleName() + "@" + System.identityHashCode(covRead)
-                            + " (safe branch replicated, kill block skipped)");
-                    param.setResult(thisObject);
+                    if (verdict != 1) {
+                        Object thisObject = chain.getThisObject();
+                        Object covRead = args[0];
+                        field.set(thisObject, covRead);
+                        if (DEBUG) {
+                            log("COLWRITE NEUTRALIZED on " + threadLabel() + " set this="
+                                    + shortVal(thisObject) + " AudioAttributesImplApi21Parcelizer="
+                                    + covRead.getClass().getSimpleName() + "@" + System.identityHashCode(covRead)
+                                    + " (safe branch replicated, kill block skipped)");
+                        }
+                        return thisObject;
+                    }
+                    // Natural path: the original body will compare equal and take the safe
+                    // branch itself. Do not interfere; the after-part records the result.
                 }
-
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                Object result = null;
+                Throwable thrown = null;
+                try {
+                    result = chain.proceed();
+                } catch (Throwable e) {
+                    thrown = e;
+                }
+                if (DEBUG) {
                     log("COLWRITE after on " + threadLabel() + " m="
-                            + ((java.lang.reflect.Method) param.method).getName()
-                            + " res=" + shortVal(param.getResult()) + " thr=" + param.getThrowable());
+                            + ((Method) chain.getExecutable()).getName()
+                            + " res=" + shortVal(result) + " thr=" + thrown);
                 }
+                if (thrown != null) throw thrown;
+                return result;
             });
         } catch (Throwable t) {
             log("o.col$write neutralizer skipped: " + t);
@@ -357,18 +405,22 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         // The audit may call write through the o.cBt$RemoteActionCompatParcelizer interface on an
         // implementation other than o.cBv. The interface method itself is abstract (Vector cannot
         // hook it); log its declaration for the record.
-        String[] innerNames = { "o.cBt$RemoteActionCompatParcelizer", "o.cBt$AudioAttributesCompatParcelizer" };
-        for (String innerName : innerNames) {
-            try {
-                Class<?> iface = XposedHelpers.findClass(innerName, classLoader);
-                log("write interface candidate " + innerName + " isInterface=" + iface.isInterface());
-            } catch (Throwable t) {
-                log("Interface write hook skipped " + innerName + ": " + t);
+        if (DEBUG) {
+            String[] innerNames = { "o.cBt$RemoteActionCompatParcelizer", "o.cBt$AudioAttributesCompatParcelizer" };
+            for (String innerName : innerNames) {
+                try {
+                    Class<?> iface = findClass(innerName, classLoader);
+                    log("write interface candidate " + innerName + " isInterface=" + iface.isInterface());
+                } catch (Throwable t) {
+                    log("Interface write hook skipped " + innerName + ": " + t);
+                }
             }
         }
 
         packerBypassInstalled = true;
-        log("Packer anti-Xposed audit disabled (o.cBt / o.cBv)!");
+        // The only line the module emits when the debug toggle is off: one per Belfius process,
+        // so it is always possible to confirm from logcat that the fix is actually live.
+        logAlways("BelfiusRoot: anti-tamper audit bypass installed (debug=" + DEBUG + ")");
 
         // The anomaly FINDER is o.cBt.read:1149 which returns Obj[2]{int[1]{measured}, String[]{signature}}.
         // The clean/no-anomaly encoding is String[0]{} (seen at cBt.write:760). The only divergence our
@@ -379,87 +431,97 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         // dies as OOM / NegativeArraySizeException (o.col$write.RemoteActionCompatParcelizer(:224)).
         // Fix at the source: when a finding is flagged (non-empty signature list), wipe BOTH the signature
         // list AND the measured int so the stored record is indistinguishable from a clean run.
-        hookAllMethodsNamed(cBt, "read", new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                Object res = param.getResult();
-                if (!(res instanceof Object[])) return;
-                Object[] o = (Object[]) res;
-                if (o.length < 2 || !(o[0] instanceof int[]) || !(o[1] instanceof String[])) return;
-                String[] strs = (String[]) o[1];
-                // CAREAD: o.cBt.read(JI)[Object] ends with `xor-int/2addr v0, v2; aput v0, int[1], 0`
-                // i.e. returned int = computed ^ (int) args[1]. Exactly one of those two operands is
-                // the CLEAN baseline a clean device returns (839523105 in this run, since clinit's
-                // hash used it); the other carries the tamper code (7). Log both + the three cwC
-                // statics so the surviving operand can be identified unambiguously. Log only.
+        hookAllMethodsNamed(cBt, "read", chain -> {
+            // NOTE: this was a hookAllMethods (all "read" overloads) after-hook in the legacy API,
+            // so the interceptor calls proceed() first and then applies the same after-the-call
+            // body; the returned Object[] is mutated in place, exactly as it was before.
+            Object result = chain.proceed();
+            Object[] args = chain.getArgs().toArray();
+            Object res = result;
+            if (!(res instanceof Object[])) return result;
+            Object[] o = (Object[]) res;
+            if (o.length < 2 || !(o[0] instanceof int[]) || !(o[1] instanceof String[])) return result;
+            String[] strs = (String[]) o[1];
+            // CAREAD: o.cBt.read(JI)[Object] ends with `xor-int/2addr v0, v2; aput v0, int[1], 0`
+            // i.e. returned int = computed ^ (int) args[1]. Exactly one of those two operands is
+            // the CLEAN baseline a clean device returns (839523105 in this run, since clinit's
+            // hash used it); the other carries the tamper code (7). Log both + the three cwC
+            // statics so the surviving operand can be identified unambiguously. Log only.
+            if (DEBUG) {
                 int measured = ((int[]) o[0]).length > 0 ? ((int[]) o[0])[0] : Integer.MIN_VALUE;
                 StringBuilder sb = new StringBuilder("CAREAD measured=" + measured);
-                if (param.args != null && param.args.length > 0 && param.args[0] instanceof Long) {
-                    sb.append(" flags=0x").append(Long.toHexString((Long) param.args[0]));
+                if (args.length > 0 && args[0] instanceof Long) {
+                    sb.append(" flags=0x").append(Long.toHexString((Long) args[0]));
                 }
-                if (param.args != null && param.args.length > 1 && param.args[1] instanceof Integer) {
-                    int a1 = ((Integer) param.args[1]).intValue();
+                if (args.length > 1 && args[1] instanceof Integer) {
+                    int a1 = ((Integer) args[1]).intValue();
                     sb.append(" arg1=").append(a1)
                       .append(" measured^arg1=").append(measured ^ a1);
                 }
                 sb.append(" sigs=").append(strs.length).append(" on ").append(threadLabel());
                 try {
-                    Class<?> cwC = XposedHelpers.findClass("o.cwC", classLoader);
+                    Class<?> cwC = findClass("o.cwC", classLoader);
                     sb.append(" | cwC.IconCompatParcelizer=")
-                      .append(XposedHelpers.getStaticIntField(cwC, "IconCompatParcelizer"))
-                      .append(" cwC.read=").append(XposedHelpers.getStaticIntField(cwC, "read"))
-                      .append(" cwC.write=").append(XposedHelpers.getStaticIntField(cwC, "write"));
+                      .append(getStaticIntField(cwC, "IconCompatParcelizer"))
+                      .append(" cwC.read=").append(getStaticIntField(cwC, "read"))
+                      .append(" cwC.write=").append(getStaticIntField(cwC, "write"));
                 } catch (Throwable ignored) {}
-                // o.cwx.read through the already-resolved Field only (no class loading / <clinit>
-                // triggered from inside this hook).
+                // o.cwx.read through the already-resolved Field only (no class loading /
+                // <clinit> triggered from inside this hook).
                 if (guardFieldExpected != null) {
                     sb.append(" | o.cwx.read=").append(guardInt(guardFieldExpected));
                 }
                 log(sb.toString());
-                if (strs.length == 0) return;
+            }
+            if (strs.length == 0) return result;
+            if (DEBUG) {
                 log("TOKEN read finding stripped on " + threadLabel()
                         + " was=" + shortVal(o[1]) + " int=" + shortVal(o[0]));
-                o[1] = new String[0];
-                // FIX AT THE SOURCE. o.cBt.read(JI)[Object] ends with `xor-int/2addr v0, v2` /
-                // `aput v0, int[1], 0`, i.e. it returns int[1]{ computed ^ (int) args[1] } where
-                // args[1] is the CLEAN baseline the caller passed in and `computed` is 0 on a clean
-                // run and the tamper code (7 here) when the scan flags a finding. Verified live:
-                //   measured=221443188 arg1=221443187 measured^arg1=7 sigs=1   (dirty)
-                //   measured=221443187 arg1=221443187 measured^arg1=0 sigs=0   (clean)
-                // cwx.write folds that dirty int into o.cwx.read (read = cwuVar.read), so
-                // o.cwx.read stops equalling the guard's recomputed H(seed, cwC.IconCompatParcelizer)
-                // and EVERY injected anti-tamper guard throws -> generic "Algemene fout" dialog.
-                // Proven numerically on pids 17373 and 23116: H(seed, clean) == the value at
-                // <clinit>, H(seed, dirty) == the value after cwx.write.
-                // Restore exactly what a clean device returns: args[1]. NOT zeroing it — the app
-                // divides by this token during UI layout (o.bII.hashCode:132) and zeroing would
-                // raise ArithmeticException; the clean baseline is non-zero like a clean run.
-                if (param.args != null && param.args.length > 1 && param.args[1] instanceof Integer) {
-                    int clean = ((Integer) param.args[1]).intValue();
-                    int[] m = (int[]) o[0];
-                    if (m.length > 0 && m[0] != clean) {
+            }
+            o[1] = new String[0];
+            // FIX AT THE SOURCE. o.cBt.read(JI)[Object] ends with `xor-int/2addr v0, v2` /
+            // `aput v0, int[1], 0`, i.e. it returns int[1]{ computed ^ (int) args[1] } where
+            // args[1] is the CLEAN baseline the caller passed in and `computed` is 0 on a clean
+            // run and the tamper code (7 here) when the scan flags a finding. Verified live:
+            //   measured=221443188 arg1=221443187 measured^arg1=7 sigs=1   (dirty)
+            //   measured=221443187 arg1=221443187 measured^arg1=0 sigs=0   (clean)
+            // cwx.write folds that dirty int into o.cwx.read (read = cwuVar.read), so
+            // o.cwx.read stops equalling the guard's recomputed H(seed, cwC.IconCompatParcelizer)
+            // and EVERY injected anti-tamper guard throws -> generic "Algemene fout" dialog.
+            // Proven numerically on pids 17373 and 23116: H(seed, clean) == the value at
+            // <clinit>, H(seed, dirty) == the value after cwx.write.
+            // Restore exactly what a clean device returns: args[1]. NOT zeroing it — the app
+            // divides by this token during UI layout (o.bII.hashCode:132) and zeroing would
+            // raise ArithmeticException; the clean baseline is non-zero like a clean run.
+            if (args.length > 1 && args[1] instanceof Integer) {
+                int clean = ((Integer) args[1]).intValue();
+                int[] m = (int[]) o[0];
+                if (m.length > 0 && m[0] != clean) {
+                    if (DEBUG) {
                         log("FIX cBt.read measured=" + m[0] + " -> clean baseline " + clean
                                 + " (tamper code " + (m[0] ^ clean) + ") on " + threadLabel());
-                        m[0] = clean;
                     }
+                    m[0] = clean;
                 }
             }
+            return result;
         });
 
         // Which slot becomes the crash byte[] length? Log every int the stream (/cov$read, on-disk
         // classes5.dex) produces on firebase threads so we can pin the producer and confirm the fix.
-        try {
-            Class<?> covRead = XposedHelpers.findClass("o.cov$read", classLoader);
-            hookAllMethodsNamed(covRead, "read", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    if (param.getResult() instanceof Number) {
-                        log("COVREAD int on " + threadLabel() + " = " + param.getResult());
+        if (DEBUG) {
+            try {
+                Class<?> covRead = findClass("o.cov$read", classLoader);
+                hookAllMethodsNamed(covRead, "read", chain -> {
+                    Object result = chain.proceed();
+                    if (result instanceof Number) {
+                        log("COVREAD int on " + threadLabel() + " = " + result);
                     }
-                }
-            });
-        } catch (Throwable t) {
-            log("cov$read observer skipped: " + t);
+                    return result;
+                });
+            } catch (Throwable t) {
+                log("cov$read observer skipped: " + t);
+            }
         }
 
         // NOTE: the per-call before/after observer on cBt.AudioAttributesCompatParcelizer /
@@ -495,18 +557,22 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         // (o.addFocusables view) builds an animator ThreadPoolExecutor (o.byu) whose
         // ThreadFactory o.bBF throws NPE on the first newThread call, killing main.
         try {
-            Class<?> bbf = XposedHelpers.findClass("o.bBF", classLoader);
-            int h = hookAllMethodsNamed(bbf, "newThread", new XC_MethodHook() {
-                private final java.util.concurrent.atomic.AtomicBoolean once =
-                        new java.util.concurrent.atomic.AtomicBoolean();
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    if (param.getThrowable() instanceof NullPointerException && param.args[0] instanceof Runnable) {
-                        log("LOGIN-THREADFACTORY NEUTRALIZED on " + threadLabel()
-                                + " -** substituting plain Thread");
-                        param.setResult(new Thread((Runnable) param.args[0]));
-                    }
+            Class<?> bbf = findClass("o.bBF", classLoader);
+            int h = hookAllMethodsNamed(bbf, "newThread", chain -> {
+                Object result = null;
+                Throwable thrown = null;
+                try {
+                    result = chain.proceed();
+                } catch (Throwable e) {
+                    thrown = e;
                 }
+                if (thrown instanceof NullPointerException && chain.getArg(0) instanceof Runnable) {
+                    log("LOGIN-THREADFACTORY NEUTRALIZED on " + threadLabel()
+                            + " -** substituting plain Thread");
+                    return new Thread((Runnable) chain.getArg(0));
+                }
+                if (thrown != null) throw thrown;
+                return result;
             });
             hookedAny |= h > 0;
             log("UI-integrity digger on o.bBF newThread (" + h + " hooks)");
@@ -525,44 +591,49 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         String[] targets = { "o.bII", "o.bFe", "o.bDV", "o.bEV", "o.bIT" };
         for (String className : targets) {
             try {
-                Class<?> c = XposedHelpers.findClass(className, classLoader);
-                int h = hookAllMethodsNamed(c, "hashCode", new XC_MethodHook() {
-                    private final java.util.concurrent.atomic.AtomicBoolean once =
-                            new java.util.concurrent.atomic.AtomicBoolean();
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        if (once.compareAndSet(false, true)) {
-                            log("UI-INTEGRITY hashCode(this) on " + threadLabel() + " -> "
-                                    + dumpFields(param.thisObject));
-                        }
+                Class<?> c = findClass(className, classLoader);
+                final java.util.concurrent.atomic.AtomicBoolean once =
+                        new java.util.concurrent.atomic.AtomicBoolean();
+                int h = hookAllMethodsNamed(c, "hashCode", chain -> {
+                    if (DEBUG && once.compareAndSet(false, true)) {
+                        log("UI-INTEGRITY hashCode(this) on " + threadLabel() + " -> "
+                                + dumpFields(chain.getThisObject()));
                     }
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        // o.bII.hashCode:132 divides by a zero field on this build and aborts the
-                        // main thread during UI layout. The original throw is an intentional gate:
-                        // consume it and supply a stable identity-based hash so layout survives.
-                        if (param.getThrowable() instanceof ArithmeticException) {
-                            log("UI-INTEGRITY hashCode NEUTRALIZED on " + threadLabel());
-                            param.setResult(System.identityHashCode(param.thisObject) * 31);
-                        }
+                    Object result = null;
+                    Throwable thrown = null;
+                    try {
+                        result = chain.proceed();
+                    } catch (Throwable e) {
+                        thrown = e;
                     }
+                    // o.bII.hashCode:132 divides by a zero field on this build and aborts the
+                    // main thread during UI layout. The original throw is an intentional gate:
+                    // consume it and supply a stable identity-based hash so layout survives.
+                    if (thrown instanceof ArithmeticException) {
+                        log("UI-INTEGRITY hashCode NEUTRALIZED on " + threadLabel());
+                        return System.identityHashCode(chain.getThisObject()) * 31;
+                    }
+                    if (thrown != null) throw thrown;
+                    return result;
                 });
                 hookedAny |= h > 0;
                 log("UI-integrity digger on " + className + " hashCode (" + h + " hooks)");
-                int hb = hookAllMethodsNamed(c, "AudioAttributesCompatParcelizer", new XC_MethodHook() {
-                    private final java.util.concurrent.atomic.AtomicBoolean once =
+                // Purely diagnostic (it only dumps fields looking for the divisor) — not installed
+                // when the debug toggle is off.
+                if (DEBUG) {
+                    final java.util.concurrent.atomic.AtomicBoolean onceAttributes =
                             new java.util.concurrent.atomic.AtomicBoolean();
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        if (once.compareAndSet(false, true)) {
+                    int hb = hookAllMethodsNamed(c, "AudioAttributesCompatParcelizer", chain -> {
+                        if (onceAttributes.compareAndSet(false, true)) {
                             log("UI-INTEGRITY " + c.getSimpleName()
                                     + ".AudioAttributesCompatParcelizer on " + threadLabel()
-                                    + " this=" + dumpFields(param.thisObject));
+                                    + " this=" + dumpFields(chain.getThisObject()));
                         }
-                    }
-                });
-                hookedAny |= hb > 0;
-                log("UI-integrity digger on " + className + " AudioAttributesCompatParcelizer (" + hb + " hooks)");
+                        return chain.proceed();
+                    });
+                    hookedAny |= hb > 0;
+                    log("UI-integrity digger on " + className + " AudioAttributesCompatParcelizer (" + hb + " hooks)");
+                }
             } catch (Throwable t) {
                 log("UI-integrity digger skipped " + className + ": " + t);
             }
@@ -738,6 +809,7 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
      * environment terms hash to the SAME constant 3825025452, i.e. they are decoys.
      */
     private String guardTriple(String why) {
+        if (!DEBUG) return "";
         return "GUARDTRIPLE[" + why
                 + " expected(i)=" + guardInt(guardFieldExpected)
                 + " actual(i2)=" + guardInt(guardFieldActual)
@@ -769,14 +841,76 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     private static boolean isStatic(Method m) {
         return Modifier.isStatic(m.getModifiers());
     }
+
+    /**
+     * Read the module's "debug" setting from inside the hooked process.
+     *
+     * <p>Modern API: the framework's remote preferences are read-only here, which is all we need —
+     * the module app writes them through the Xposed service. Any failure degrades to OFF, the safe
+     * default (so a framework that has no service, or no stored value yet, simply runs diagnostics
+     * off).
+     */
+    private boolean readDebugPref() {
+        try {
+            SharedPreferences prefs = getRemotePreferences(ModuleSettings.PREFS);
+            return prefs != null && prefs.getBoolean(ModuleSettings.KEY_DEBUG, false);
+        } catch (Throwable t) {
+            Log.e(TAG, "readDebugPref failed", t);
+            return false;
+        }
+    }
+
+    /** Always-on log: reserved for the one startup line and for hard failures during install. */
+    private static void logAlways(String msg) {
+        try {
+            BelfiusRoot m = instance;
+            if (m != null) m.log(Log.INFO, TAG, msg);
+            else Log.i(TAG, msg);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * Diagnostic log — no-op unless the module's "debug" setting is on.
+     *
+     * <p>Note that gating here only removes the logd write; callers that build expensive arguments
+     * (token dumps, {@code findClass}, stack traces) must still guard themselves with {@code DEBUG}.
+     */
+    private static void log(String msg) {
+        if (!DEBUG) return;
+        try {
+            BelfiusRoot m = instance;
+            if (m != null) m.log(Log.INFO, TAG, msg);
+            else Log.i(TAG, msg);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Diagnostic log of a throwable — no-op unless the module's "debug" setting is on. */
+    private static void log(Throwable t) {
+        if (!DEBUG) return;
+        try {
+            BelfiusRoot m = instance;
+            if (m != null) m.log(Log.ERROR, TAG, String.valueOf(t), t);
+            else Log.e(TAG, String.valueOf(t), t);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * Caller label for a diagnostic line. Expensive (full stack capture), so it returns an empty
+     * string as soon as diagnostics are off — every call site just concatenates the result.
+     */
     private static String threadLabel() {
+        if (!DEBUG) return "";
         StackTraceElement[] st = Thread.currentThread().getStackTrace();
         StringBuilder sb = new StringBuilder(Thread.currentThread().getName());
         int shown = 0;
         for (StackTraceElement e : st) {
             String cn = e.getClassName();
             if (cn.startsWith("java.lang") || cn.startsWith("dalvik") || cn.startsWith("be.belfius.directmobile.android.root")
-                    || cn.startsWith("de.robv") || cn.contains("XposedBridge") || cn.startsWith("Vector_")) {
+                    || cn.startsWith("io.github.libxposed")
+                    || cn.contains("XposedBridge") || cn.startsWith("Vector_")) {
                 continue;
             }
             sb.append(" <- ").append(e.getClassName().replaceAll("^.*[./]", "")).append('.')
@@ -851,12 +985,61 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         return sb.toString();
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Modern (libxposed API 102) hook plumbing + the reflection helpers the framework no longer
+    // provides (there is no XposedHelpers in the modern API).
+    // ------------------------------------------------------------------------------------------
+
+    /** Interceptor body; uses {@code chain.getArg(i)} / {@code chain.proceed()} directly. */
+    private interface Intercept {
+        Object run(XposedInterface.Chain chain) throws Throwable;
+    }
+
+    /** After-hook body: the original already ran and returned {@code result}. */
+    private interface After {
+        Object run(XposedInterface.Chain chain, Object result) throws Throwable;
+    }
+
+    /**
+     * Around-hook body: the original already ran and either returned {@code result} or threw
+     * {@code thrown}. The body MUST rethrow {@code thrown} when it does not substitute a result.
+     */
+    private interface Around {
+        Object run(XposedInterface.Chain chain, Object result, Throwable thrown) throws Throwable;
+    }
+
+    /** {@code Class.forName} with initialisation off, i.e. the legacy findClass helper. */
+    private static Class<?> findClass(String className, ClassLoader classLoader)
+            throws ClassNotFoundException {
+        return Class.forName(className, false, classLoader);
+    }
+
+    /** The legacy findField helper: declared field, or one inherited, made accessible. */
+    private static Field findField(Class<?> clazz, String name) throws NoSuchFieldException {
+        for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
+            try {
+                Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f;
+            } catch (NoSuchFieldException ignored) {
+                // keep walking up
+            }
+        }
+        throw new NoSuchFieldException(clazz.getName() + "." + name);
+    }
+
+    /** The legacy getStaticIntField helper. */
+    private static int getStaticIntField(Class<?> clazz, String name)
+            throws NoSuchFieldException, IllegalAccessException {
+        return findField(clazz, name).getInt(null);
+    }
+
     /** Hooks every declared method of clazz whose name matches (signature-agnostic). */
-    private static int hookAllMethodsNamed(Class<?> clazz, String name, XC_MethodHook callback) {
+    private int hookAllMethodsNamed(Class<?> clazz, String name, Intercept body) {
         int hooked = 0;
         for (Method m : clazz.getDeclaredMethods()) {
             if (m.getName().equals(name)) {
-                hookOne(clazz, m, callback);
+                hookOne(clazz, m, body);
                 hooked++;
             }
         }
@@ -864,13 +1047,47 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         return hooked;
     }
 
-    private static void hookOne(Class<?> clazz, Method m, XC_MethodHook callback) {
+    private XposedInterface.HookHandle hookOne(Class<?> clazz, Method m, Intercept body) {
         try {
             log("hooking " + clazz.getName() + "#" + m + (Modifier.isStatic(m.getModifiers()) ? " (static)" : ""));
-            XposedBridge.hookMethod(m, callback);
+            m.setAccessible(true);
+            return hook(m).intercept(body::run);
         } catch (Throwable t) {
             log("hookMethod failed " + clazz.getName() + "#" + m + ": " + t);
+            return null;
         }
+    }
+
+    /** Runs {@code body} after the original; an exception from the original still propagates. */
+    private XposedInterface.HookHandle after(Method m, After body) {
+        return hookOne(m.getDeclaringClass(), m, chain -> body.run(chain, chain.proceed()));
+    }
+
+    /** Runs {@code body} with the original's outcome; the body decides what to return / rethrow. */
+    private XposedInterface.HookHandle around(Method m, Around body) {
+        return hookOne(m.getDeclaringClass(), m, chain -> {
+            Object result = null;
+            Throwable thrown = null;
+            try {
+                result = chain.proceed();
+            } catch (Throwable t) {
+                thrown = t;
+            }
+            return body.run(chain, result, thrown);
+        });
+    }
+
+    /**
+     * The legacy findAndHookMethod helper: resolves {@code className#methodName} on the given
+     * loader and hooks it. Throws when the class or the method is missing, exactly like the legacy
+     * helper did (several call sites rely on that to decide whether they are installed).
+     */
+    private XposedInterface.HookHandle hookMethod(ClassLoader classLoader, String className,
+                                                  String methodName, Class<?>[] parameterTypes,
+                                                  Intercept body) throws Throwable {
+        Class<?> clazz = findClass(className, classLoader);
+        Method m = clazz.getDeclaredMethod(methodName, parameterTypes);
+        return hookOne(clazz, m, body);
     }
 
     /**
@@ -883,13 +1100,24 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
     };
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
-        if (!BELFIUS_PKG.equals(loadPackageParam.packageName)) return;
+    public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
+        instance = this;
+        processName = param.getProcessName();
+        logAlways("modern module loaded: process=" + param.getProcessName()
+                + " framework=" + getFrameworkName() + " " + getFrameworkVersion()
+                + " api=" + getApiVersion());
+        DEBUG = readDebugPref();
+    }
 
-        ClassLoader classLoader = loadPackageParam.classLoader;
+    @Override
+    public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
+        if (!BELFIUS_PKG.equals(param.getPackageName())) return;
+
+        ClassLoader classLoader = param.getDefaultClassLoader();
+        DEBUG = readDebugPref();
         log("handleLoadPackage for " + BELFIUS_PKG + " loader=" + classLoader);
         try {
-            log("   appInfo=" + loadPackageParam.appInfo);
+            log("   appInfo=" + param.getApplicationInfo());
         } catch (Throwable ignored) {}
 
         for (Target target : PLATFORM_TARGETS) {
@@ -908,64 +1136,62 @@ public class BelfiusRoot implements IXposedHookLoadPackage {
         // attachBaseContext, after this callback runs. Watch the classloader: the moment a packer
         // class is first requested we install its hooks before any of its methods can execute.
         try {
-XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass",
-                            String.class, new XC_MethodHook() {
-                                private boolean installing;
-
-                                @Override
-                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                    if (installing) return;
-                                    String name = (String) param.args[0];
-                                    if (name == null) return;
-                                    if (name.startsWith("o.")) {
-                                        if (classLoadLogs.getAndDecrement() > 0) {
-                                            log("CLASSLOAD " + name + " via " + param.thisObject);
-                                        } else {
-                                            log("...further class loads suppressed");
-                                        }
-                                    }
-                                    if (name.startsWith("o.cBt") || name.startsWith("o.cBv")
-                                            || name.startsWith("o.cCB")) {
-                                        installing = true;
-                                        try {
-                                            hookPackerBypass(classLoader);
-                                        } finally {
-                                            installing = false;
-                                        }
-                                    } else if (name.startsWith("o.ckg") && !detectionTargetsHooked) {
-                                        installing = true;
-                                        try {
-                                            hookDetectionTargets(classLoader);
-                                        } finally {
-                                            installing = false;
-                                        }
-                                    } else if (name.startsWith("o.getInstance")) {
-                                        installing = true;
-                                        try {
-                                            hookErrorDiagnostics(classLoader);
-                                        } finally {
-                                            installing = false;
-                                        }
-                                    } else if (name.startsWith("o.aYE")) {
-                                        installing = true;
-                                        try {
-                                            hookGuardThrowSites(classLoader, "o.aYE", "setVisibility");
-                                        } finally {
-                                            installing = false;
-                                        }
-                                    } else if (!uiIntegrityDiggerArmed.get()
-                                            && (name.startsWith("o.bII") || name.startsWith("o.zbxt")
-                                                    || name.startsWith("o.bDV") || name.startsWith("o.bFe")
-                                                    || name.startsWith("o.bEV") || name.startsWith("o.bIT"))) {
-                                        installing = true;
-                                        try {
-                                            hookUiIntegrityDigger(classLoader);
-                                        } finally {
-                                            installing = false;
-                                        }
-                                    }
-                                }
-                            });
+            final java.util.concurrent.atomic.AtomicBoolean installing = new java.util.concurrent.atomic.AtomicBoolean();
+            hookMethod(classLoader, "java.lang.ClassLoader", "loadClass",
+                    new Class<?>[] { String.class }, chain -> {
+                        Object loadResult = chain.proceed();
+                        if (installing.get()) return loadResult;
+                        String name = (String) chain.getArg(0);
+                        if (name == null) return loadResult;
+                        if (name.startsWith("o.")) {
+                            if (classLoadLogs.getAndDecrement() > 0) {
+                                log("CLASSLOAD " + name + " via " + chain.getThisObject());
+                            } else {
+                                log("...further class loads suppressed");
+                            }
+                        }
+                        if (name.startsWith("o.cBt") || name.startsWith("o.cBv")
+                                || name.startsWith("o.cCB")) {
+                            installing.set(true);
+                            try {
+                                hookPackerBypass(classLoader);
+                            } finally {
+                                installing.set(false);
+                            }
+                        } else if (name.startsWith("o.ckg") && !detectionTargetsHooked) {
+                            installing.set(true);
+                            try {
+                                hookDetectionTargets(classLoader);
+                            } finally {
+                                installing.set(false);
+                            }
+                        } else if (name.startsWith("o.getInstance")) {
+                            installing.set(true);
+                            try {
+                                hookErrorDiagnostics(classLoader);
+                            } finally {
+                                installing.set(false);
+                            }
+                        } else if (name.startsWith("o.aYE")) {
+                            installing.set(true);
+                            try {
+                                hookGuardThrowSites(classLoader, "o.aYE", "setVisibility");
+                            } finally {
+                                installing.set(false);
+                            }
+                        } else if (!uiIntegrityDiggerArmed.get()
+                                && (name.startsWith("o.bII") || name.startsWith("o.zbxt")
+                                        || name.startsWith("o.bDV") || name.startsWith("o.bFe")
+                                        || name.startsWith("o.bEV") || name.startsWith("o.bIT"))) {
+                            installing.set(true);
+                            try {
+                                hookUiIntegrityDigger(classLoader);
+                            } finally {
+                                installing.set(false);
+                            }
+                        }
+                        return loadResult;
+                    });
             log("Classloader watcher installed.");
         } catch (Throwable t) {
             log("Classloader watcher failed: " + t);
@@ -978,28 +1204,28 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
         String[] attachChain = { "o.fP", "o.lS", "o.zbtp" };
         for (final String className : attachChain) {
             try {
-                XposedHelpers.findAndHookMethod(className, classLoader, "attachBaseContext",
-                        Context.class, new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                log(">> attachBaseContext " + className + " on thread "
-                                        + Thread.currentThread().getName());
+                hookMethod(classLoader, className, "attachBaseContext",
+                        new Class<?>[] { Context.class }, chain -> {
+                            log(">> attachBaseContext " + className + " on thread "
+                                    + Thread.currentThread().getName());
+                            Object result = null;
+                            Throwable thrown = null;
+                            try {
+                                result = chain.proceed();
+                            } catch (Throwable e) {
+                                thrown = e;
                             }
-
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                if (param.getThrowable() != null) {
-                                    log("FAIL " + className + ".attachBaseContext threw: "
-                                            + param.getThrowable());
-                                    log(param.getThrowable());
-                                    param.setResult(null);
-                                } else {
-                                    log("OK  " + className + ".attachBaseContext completed");
-                                    if (!packerBypassInstalled) {
-                                        hookPackerBypass(classLoader);
-                                    }
+                            if (thrown != null) {
+                                log("FAIL " + className + ".attachBaseContext threw: " + thrown);
+                                log(thrown);
+                                return null;
+                            } else {
+                                log("OK  " + className + ".attachBaseContext completed");
+                                if (!packerBypassInstalled) {
+                                    hookPackerBypass(classLoader);
                                 }
                             }
+                            return result;
                         });
                 log("Attach swallow installed on " + className);
             } catch (Throwable t) {
@@ -1010,61 +1236,59 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
         // If the injected loader surfaces at runtime, still grab it and neutralise the audit
         // classes directly (belt and braces on top of the attach swallow).
         try {
-            XposedHelpers.findAndHookMethod("o.dispatchWindowInsetsAnimationProgress", classLoader,
-                    "read", int.class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            Object result = param.getResult();
-                            // GUARDFIELD diagnostic: report the four handles the injected
-                            // anti-tamper guard uses, so we learn which class owns the three shared
-                            // static int fields it validates (log-only, no result is modified).
-                            int guardHandle = ((Integer) param.args[0]).intValue();
-                            if (isGuardFieldId(guardHandle)) {
-                                noteGuardField(guardHandle, result);
-                                if (guardFieldSeen.add(guardHandle)) {
-                                    logGuardField("read(" + guardHandle + ")", result);
-                                }
-                                // The seed (i3) is read LAST inside every guard invocation, so at
-                                // that point expected/actual/seed are all known: sample the triple
-                                // plus every clock the hash feeds (capped — guards run often).
-                                if (guardHandle == GUARD_ID_SEED
-                                        && guardTripleLogs.getAndIncrement() < 10) {
-                                    log(guardTriple("resolver-seed-read"));
-                                }
+            hookMethod(classLoader, "o.dispatchWindowInsetsAnimationProgress", "read",
+                    new Class<?>[] { int.class }, chain -> {
+                        Object result = chain.proceed();
+                        // GUARDFIELD diagnostic: report the four handles the injected
+                        // anti-tamper guard uses, so we learn which class owns the three shared
+                        // static int fields it validates (log-only, no result is modified).
+                        int guardHandle = ((Integer) chain.getArg(0)).intValue();
+                        if (isGuardFieldId(guardHandle)) {
+                            noteGuardField(guardHandle, result);
+                            if (DEBUG && guardFieldSeen.add(guardHandle)) {
+                                logGuardField("read(" + guardHandle + ")", result);
                             }
-                            if (result instanceof Member) {
-                                Member member = (Member) result;
-                                Class<?> dc = member.getDeclaringClass();
-                                Integer handle = (Integer) param.args[0];
-                                ClassLoader loader = dc.getClassLoader();
-                                // The audit resolves the same native bridge members in a hot loop;
-                                // log each handle once (with its caller) so the log stays readable.
-                                if (resolverSeen.putIfAbsent(handle,
-                                        dc.getName() + "." + member) == null) {
-                                    log("RESOLVER read(" + handle + ") FIRST -> " + dc + "."
-                                            + member + " via " + loader);
-                                    log("RESOLVER caller -> " + new Exception("resolver-first"));
-                                }
-                                // o.cBt/o.cBv and the native bridge classes all live in the SAME
-                                // injected InMemoryDexClassLoader. Now that we can reach it, install
-                                // the bypass + detection hooks against it directly.
-                                if (loader != null) {
-                                    if (!packerBypassInstalled) {
-                                        hookPackerBypass(loader);
-                                    }
-                                    hookResolveSizeAndState(loader);
-                                    hookErrorDiagnostics(loader);
-                                    if (!detectionTargetsHooked) {
-                                        hookDetectionTargets(loader);
-                                    }
-                                    if (!uiIntegrityDiggerArmed.get()) {
-                                        hookUiIntegrityDigger(loader);
-                                    }
-                                }
-                            } else {
-                                log("RESOLVER read(" + param.args[0] + ") -> " + result);
+                            // The seed (i3) is read LAST inside every guard invocation, so at
+                            // that point expected/actual/seed are all known: sample the triple
+                            // plus every clock the hash feeds (capped — guards run often).
+                            if (DEBUG && guardHandle == GUARD_ID_SEED
+                                    && guardTripleLogs.getAndIncrement() < 10) {
+                                log(guardTriple("resolver-seed-read"));
                             }
                         }
+                        if (result instanceof Member) {
+                            Member member = (Member) result;
+                            Class<?> dc = member.getDeclaringClass();
+                            Integer handle = (Integer) chain.getArg(0);
+                            ClassLoader loader = dc.getClassLoader();
+                            // The audit resolves the same native bridge members in a hot loop;
+                            // log each handle once (with its caller) so the log stays readable.
+                            if (DEBUG && resolverSeen.putIfAbsent(handle,
+                                    dc.getName() + "." + member) == null) {
+                                log("RESOLVER read(" + handle + ") FIRST -> " + dc + "."
+                                        + member + " via " + loader);
+                                log("RESOLVER caller -> " + new Exception("resolver-first"));
+                            }
+                            // o.cBt/o.cBv and the native bridge classes all live in the SAME
+                            // injected InMemoryDexClassLoader. Now that we can reach it, install
+                            // the bypass + detection hooks against it directly.
+                            if (loader != null) {
+                                if (!packerBypassInstalled) {
+                                    hookPackerBypass(loader);
+                                }
+                                hookResolveSizeAndState(loader);
+                                hookErrorDiagnostics(loader);
+                                if (!detectionTargetsHooked) {
+                                    hookDetectionTargets(loader);
+                                }
+                                if (!uiIntegrityDiggerArmed.get()) {
+                                    hookUiIntegrityDigger(loader);
+                                }
+                            }
+                        } else {
+                            log("RESOLVER read(" + chain.getArg(0) + ") -> " + result);
+                        }
+                        return result;
                     });
             log("Resolver watcher installed.");
         } catch (Throwable t) {
@@ -1076,21 +1300,21 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
         // CLASS from (c,i,i2) and the member from its name. Observe only the four keys the guard
         // uses, so the app's (very hot) reflection traffic is unaffected.
         try {
-            XposedHelpers.findAndHookMethod("o.dispatchWindowInsetsAnimationProgress", classLoader,
-                    "IconCompatParcelizer",
-                    char.class, int.class, int.class, int.class, boolean.class, String.class,
-                    Class[].class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            Object k = param.args[3];
-                            if (!(k instanceof Integer)) return;
-                            int key = ((Integer) k).intValue();
-                            if (!isGuardBuildKey(key)) return;
-                            noteGuardField(guardIdForKey(key), param.getResult());
-                            if (!guardBuildSeen.add(key)) return;
-                            logGuardField("build(key=" + key + ", name=" + param.args[5] + ")",
-                                    param.getResult());
+            hookMethod(classLoader, "o.dispatchWindowInsetsAnimationProgress", "IconCompatParcelizer",
+                    new Class<?>[] { char.class, int.class, int.class, int.class, boolean.class,
+                            String.class, Class[].class },
+                    chain -> {
+                        Object result = chain.proceed();
+                        Object k = chain.getArg(3);
+                        if (!(k instanceof Integer)) return result;
+                        int key = ((Integer) k).intValue();
+                        if (!isGuardBuildKey(key)) return result;
+                        noteGuardField(guardIdForKey(key), result);
+                        if (DEBUG && guardBuildSeen.add(key)) {
+                            logGuardField("build(key=" + key + ", name=" + chain.getArg(5) + ")",
+                                    result);
                         }
+                        return result;
                     });
             log("Guard-field builder watcher installed.");
         } catch (Throwable t) {
@@ -1101,6 +1325,18 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
         // classes the stub introspects, but hooking java.lang.Class reflection is extremely chatty
         // (every framework lookup passes through it) and rotated the activation lines out of the
         // daemon log. The packer/audit structure is fully mapped now, so they are removed.
+
+        // Deliberate one-off verdict (the only always-on output; everything else is behind the
+        // debug toggle). Emitted once in the app's MAIN process so a multi-process app does not
+        // repeat it. "audit=pending" is normal here — the injected audit loader appears later,
+        // which is when the second line (audit bypass installed) is printed.
+        if (processName == null
+                || processName.equals(BELFIUS_PKG)) {
+            logAlways("BelfiusRoot: hooks armed for " + BELFIUS_PKG
+                    + " (detection=" + detectionHooks
+                    + ", audit=" + (packerBypassInstalled ? "installed" : "pending")
+                    + ", debug=" + (DEBUG ? "on" : "off") + ")");
+        }
 
         // The brute force is only a fallback for the app versions predating the exact targets above,
         // running it on a newer version risks hooking an unrelated method that happens to match
@@ -1117,16 +1353,10 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
                     String methodNameStr = className + "." + methodName + "()";
 
                     // Attempt to hook the method
-                    XposedHelpers.findAndHookMethod(
-                            className,
-                            classLoader,
-                            methodName,
-                            new XC_MethodHook() {
-                                @Override
-                                protected void afterHookedMethod(MethodHookParam param) {
-                                    param.setResult(HAS_ROOT);
-                                }
-                            });
+                    hookMethod(classLoader, className, methodName, NO_ARGS, chain -> {
+                        chain.proceed();
+                        return HAS_ROOT;
+                    });
 
                     // Log success + abort loops
                     log("Successfully hooked " + methodNameStr + "!");
@@ -1158,18 +1388,8 @@ XposedHelpers.findAndHookMethod("java.lang.ClassLoader", classLoader, "loadClass
 
     private boolean hook(ClassLoader classLoader, Target target) {
         try {
-            Object[] args = new Object[target.parameterTypes.length + 1];
-            for (int i = 0; i < target.parameterTypes.length; i++) {
-                args[i] = target.parameterTypes[i];
-            }
-            args[target.parameterTypes.length] = new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    param.setResult(target.result);
-                }
-            };
-
-            XposedHelpers.findAndHookMethod(target.className, classLoader, target.methodName, args);
+            hookMethod(classLoader, target.className, target.methodName, target.parameterTypes,
+                    chain -> target.result);
 
             log("Successfully hooked " + target + "!");
             return true;
