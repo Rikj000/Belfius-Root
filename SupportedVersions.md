@@ -12,8 +12,8 @@ This file tracks compatibility between the Belfius Mobile Android app and the Be
 
 | Belfius App Version | Version Code | Belfius-Root Support | Patched in Belfius-Root (first time) | Tested with Belfius-Root versions | Still allowed by Belfius? | Notes |
 |--------------------:|------------:|:-------------------:|:-----------------------------------:|:--------------------------------|:------------------------:|:------|
-| v26.3.0 | 262601628 | ❌ | — | — | ✅ | Current version as of 17/09/2026 - Unpatched |
-| v26.1.0 | 260781255 | ❌ | — | — | ✅ | Belfius v26.1.0 introduced new changes, which appear to include explicit anti-hooking detection, which appear to trigger a memory exhaustion attack when it detects any hooking framework. |
+| v26.3.0 | 262601628 | ✅ | v1.2.0 | - v1.2.0 | ✅ | Belfius moved its protection into code the packer injects into the app at runtime — background tamper checks that raises errors and root detection. New methods are added to mislead the tamper checks before they can act. The "About this app" rooted status forced to "not rooted" as this is used for detection too now. |
+| v26.1.0 | 260781255 | ✅ | v1.2.0 | - v1.2.0 | ✅ | Introduced aggressive anti-hooking: spotting a hooking framework can make the app exhaust its own memory. The module is adapted to hide from this and also uses a more modern hook set. |
 | v25.4.1 | 260201622 | ✅ | v1.1.2 | - v1.1.2 | ❌ | Legacy |
 | v25.4.0 | 253451500 | ✅ | v1.1.1 | - v1.1.1 | ❌ | Legacy |
 | v25.3.0 | 252812031 | ✅ | v1.1.0 | - v1.1.0, v1.1.1 | ❌ | Legacy |
@@ -29,8 +29,3 @@ This file tracks compatibility between the Belfius Mobile Android app and the Be
 ## Notes on finding APKs
 
 - The Version Code can be used to download a specific APK via FOSS app stores like [Aurora Store](https://auroraoss.com/) (manual download by version code / specific version).
-
-
-
-### Testing note
-When verifying a new version with root bypass, also check the in-app "About this app" screen (top-right 3-dot menu → "over deze app") — it must show `Rooted: false` on a rooted device for the bypass to be considered fully effective.
