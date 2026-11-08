@@ -22,6 +22,20 @@
             android:text="@string/settings_debug_summary"
             android:textAppearance="?attr/textAppearanceCaption" />
 
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switch_scanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="24dp"
+            android:text="@string/settings_scanner_title" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp"
+            android:text="@string/settings_scanner_summary"
+            android:textAppearance="?attr/textAppearanceCaption" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

@@ -43,20 +43,24 @@ final class ModuleLog {
     }
 
     /**
-     * Reads the module's "debug" setting from inside the hooked process. The framework's remote
-     * preferences are read-only here, which is all we need — the module app does the writing.
-     * Any failure degrades to OFF, the safe default.
+     * Reads a module setting from inside the hooked process. The framework's remote preferences are
+     * read-only here, which is all we need — the module app does the writing. Any failure degrades
+     * to OFF, the safe default.
      *
      * @return the stored value, or {@code false} when it cannot be read
      */
-    static boolean readDebugPref() {
+    static boolean readPref(String key) {
         try {
             SharedPreferences prefs = module.getRemotePreferences(ModuleSettings.PREFS);
-            return prefs != null && prefs.getBoolean(ModuleSettings.KEY_DEBUG, false);
+            return prefs != null && prefs.getBoolean(key, false);
         } catch (Throwable t) {
-            Log.e(TAG, "readDebugPref failed", t);
+            Log.e(TAG, "readPref(" + key + ") failed", t);
             return false;
         }
+    }
+
+    static boolean readDebugPref() {
+        return readPref(ModuleSettings.KEY_DEBUG);
     }
 
     /** Always-on log: the startup verdicts and hard failures during installation. */

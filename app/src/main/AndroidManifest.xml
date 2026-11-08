@@ -20,8 +20,8 @@
         android:theme="@style/Theme.BelfiusRoot"
         tools:targetApi="31">
 
-        <!-- Settings screen (single "debug logging" switch). Also the way to open the module
-             from its launcher icon. The value lives in the framework's remote preferences. -->
+        <!-- Settings screen (diagnostics + isolated-scanner switches). Also the way to open the
+             module from its launcher icon. The values live in the framework's remote preferences. -->
         <activity
             android:name=".SettingsActivity"
             android:exported="true"
@@ -32,12 +32,14 @@
             </intent-filter>
         </activity>
 
-        <!-- Scripted toggle: see agentic_dev/scripts/reload-and-test.sh (am broadcast ...SET_DEBUG). -->
+        <!-- Scripted toggles: see agentic_dev/scripts/reload-and-test.sh
+             (am broadcast ...SET_DEBUG / ...SET_SCANNER). -->
         <receiver
             android:name=".DebugToggleReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="be.belfius.directmobile.android.root.SET_DEBUG" />
+                <action android:name="be.belfius.directmobile.android.root.SET_SCANNER" />
             </intent-filter>
         </receiver>
     </application>

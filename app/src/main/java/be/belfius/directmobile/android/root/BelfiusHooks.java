@@ -30,6 +30,7 @@ final class BelfiusHooks {
     private final DetectionHooks detection = new DetectionHooks();
     private final UiIntegrityHooks uiIntegrity = new UiIntegrityHooks();
     private final ErrorDiagnostics errorDiagnostics = new ErrorDiagnostics(guard);
+    private final IsolatedScannerBypass scanner = new IsolatedScannerBypass();
 
     /** Remaining CLASSLOAD lines to print before the watcher goes quiet (the app loads o.* en masse). */
     private final AtomicInteger classLoadLogs = new AtomicInteger(200);
@@ -37,9 +38,9 @@ final class BelfiusHooks {
     private final Map<Integer, String> resolverSeen = new ConcurrentHashMap<>();
 
     void install(ClassLoader classLoader, String processName) {
-        // Always on: framework names survive every Belfius build, so these need no version.
+        // Framework names survive every Belfius build, so these need no version.
         detection.hookPlatformTargets(classLoader);
-        // Always on: it waits for classes that only exist after injection, and acts only when the
+        // It waits for classes that only exist after injection, and acts only when the
         // resolved profile wants them — so a legacy build merely pays for the hook, not the work.
         installClassLoadWatcher(classLoader);
         // Everything else is version-specific and is installed from the resolved profile, before the
@@ -52,8 +53,22 @@ final class BelfiusHooks {
      * Installs the version-specific set, chosen by {@link VersionProfile}: a legacy build gets the
      * original brute-force scan and none of the v26.x hooks, while a modern build gets the detection
      * targets, the packer/RASP bypass and the diagnostics.
+     *
+     * <p>The module's "scanner" setting is <b>additive</b>: on a build that ships the isolated
+     * scanner service, switching it on adds the service-start block <em>on top of</em> this set
+     * instead of replacing it. The two defend different tripwires — the scanner reports the root
+     * environment from a process this module is never loaded into, while the packer audit measures
+     * the hooks this framework installs here — so one can never stand in for the other. The setting
+     * is off by default, which is what keeps this method's behaviour unchanged.
      */
     private void installFor(ClassLoader classLoader, VersionProfile profile, String processName) {
+        // Installed first: the app binds the scanner during startup, before any packer class is
+        // requested, and this hook set is what keeps that bind from reaching the system.
+        boolean scannerDisarmed = scanner.isActiveFor(profile);
+        if (scannerDisarmed) {
+            scanner.install(classLoader);
+        }
+
         int detectionHooks = 0;
         if (profile.wantsModernHooks()) {
             detectionHooks = detection.hookDetectionTargets(classLoader);
@@ -75,12 +90,22 @@ final class BelfiusHooks {
         // The one-off verdict: the module's only always-on output besides the audit line. Emitted
         // once, in the app's main process, so a multi-process app does not repeat it. "audit=pending"
         // is normal here — the injected audit loader appears later, which is when the second line is
-        // printed.
+        // printed. "scanner=" states what the additive switch added, so a reload can be checked
+        // for it without a second line.
         if (processName == null || processName.equals(BelfiusRoot.BELFIUS_PKG)) {
             logAlways("BelfiusRoot: hooks armed for " + BelfiusRoot.BELFIUS_PKG
                     + " (detection=" + detectionHooks
                     + ", audit=" + (packerBypass.isInstalled() ? "installed" : "pending")
-                    + ", debug=" + (DEBUG ? "on" : "off") + ")");
+                    + ", debug=" + (DEBUG ? "on" : "off")
+                    + ", scanner=" + (scannerDisarmed ? "disarmed" : "off") + ")");
+        }
+
+        // The setting was asked for on a build with nothing to disarm. Say so on the verdict line
+        // rather than leaving the user wondering why SCANNER-DISARM never appears.
+        if (IsolatedScannerBypass.enabled && !profile.hasIsolatedScanner()) {
+            logAlways("BelfiusRoot: isolated-scanner bypass requested but profile="
+                    + profile.label() + " ships no isolated scanner service - standard hook set"
+                    + " applied unchanged");
         }
 
         if (detectionHooks > 0) {

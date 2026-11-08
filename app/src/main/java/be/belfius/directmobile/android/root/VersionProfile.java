@@ -40,6 +40,20 @@ enum VersionProfile {
         return this != LEGACY;
     }
 
+    /**
+     * True for builds that ship the isolated scanner service — the extra process Belfius added in
+     * v26.3.0 that runs under a one-off UID outside every root manager's mount filtering and reports
+     * "rooted" home. v26.1.0 has no such service, so on the {@link #LEGACY} and {@link #V26_1}
+     * profiles the scanner setting has nothing to disarm and is reported as a no-op.
+     *
+     * <p>UNKNOWN (newer than this module knows) is assumed to still have one: it is the mechanism a
+     * new build would inherit, and the disarm keys off the manifest flag rather than the service
+     * name, so a rename does not invalidate it.
+     */
+    boolean hasIsolatedScanner() {
+        return this == V26_3 || this == UNKNOWN;
+    }
+
     /** Maps a versionCode to a profile; anything newer than {@link #CURRENT} is UNKNOWN on purpose. */
     static VersionProfile of(long versionCode) {
         if (versionCode > CURRENT) return UNKNOWN;

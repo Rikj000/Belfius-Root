@@ -24,10 +24,18 @@ public final class ModuleSettings {
     public static final String MODULE_PKG = "be.belfius.directmobile.android.root";
     /** Broadcast action that flips {@link #KEY_DEBUG} from a shell. */
     public static final String ACTION_SET_DEBUG = MODULE_PKG + ".SET_DEBUG";
+    /** Broadcast action that flips {@link #KEY_SCANNER} from a shell. */
+    public static final String ACTION_SET_SCANNER = MODULE_PKG + ".SET_SCANNER";
     /** Remote preferences group. */
     public static final String PREFS = "settings";
     /** Emit the module's diagnostics to logcat. Off by default — see SettingsActivity. */
     public static final String KEY_DEBUG = "debug";
+    /**
+     * Add the isolated-scanner disarm on top of the per-method bypass. Off by default: off is the
+     * behaviour this module has always shipped, so a user who never opens the settings screen keeps
+     * the verified bypass, byte for byte.
+     */
+    public static final String KEY_SCANNER = "scanner";
 
     private static final String TAG = "BelfiusRoot";
     /** The framework sends the service shortly after the module app is launched. */
@@ -76,23 +84,25 @@ public final class ModuleSettings {
         return service;
     }
 
-    /** Reads the stored value, or {@code null} when the framework is unreachable. */
-    public static Boolean read() throws InterruptedException {
+    /**
+     * Reads a stored value, or {@code null} when the framework is unreachable.
+     */
+    public static Boolean read(String key) throws InterruptedException {
         XposedService s = awaitService();
         if (s == null) return null;
-        return s.getRemotePreferences(PREFS).getBoolean(KEY_DEBUG, false);
+        return s.getRemotePreferences(PREFS).getBoolean(key, false);
     }
 
     /**
-     * Stores the value in the framework's remote preferences.
+     * Stores a value in the framework's remote preferences.
      *
      * @return {@code false} when the framework service is unreachable or the write failed.
      */
-    public static boolean setDebug(boolean enabled) throws InterruptedException {
+    public static boolean write(String key, boolean value) throws InterruptedException {
         XposedService s = awaitService();
         if (s == null) return false;
         // commit(), not apply(): the value must be in the framework database before the Belfius
         // process reads it while installing its hooks.
-        return s.getRemotePreferences(PREFS).edit().putBoolean(KEY_DEBUG, enabled).commit();
+        return s.getRemotePreferences(PREFS).edit().putBoolean(key, value).commit();
     }
 }

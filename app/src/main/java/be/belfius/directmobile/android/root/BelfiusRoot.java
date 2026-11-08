@@ -44,6 +44,7 @@ public class BelfiusRoot extends XposedModule {
 
         ClassLoader classLoader = param.getDefaultClassLoader();
         DEBUG = readDebugPref();
+        IsolatedScannerBypass.readSetting();
         ModuleLog.log("handleLoadPackage for " + BELFIUS_PKG + " loader=" + classLoader);
         try {
             ModuleLog.log("   appInfo=" + param.getApplicationInfo());
