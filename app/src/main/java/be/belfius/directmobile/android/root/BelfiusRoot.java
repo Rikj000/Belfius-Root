@@ -1,60 +1,55 @@
 package be.belfius.directmobile.android.root;
 
-import static de.robv.android.xposed.XposedBridge.log;
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import static be.belfius.directmobile.android.root.ModuleLog.DEBUG;
+import static be.belfius.directmobile.android.root.ModuleLog.logAlways;
+import static be.belfius.directmobile.android.root.ModuleLog.readDebugPref;
 
+/**
+ * The module's entry point, written against the modern libxposed API (API 102).
+ *
+ * <p>The framework instantiates this class once per process, calls {@link #onModuleLoaded}, and
+ * then {@link #onPackageLoaded} for each package it loads. Everything else lives in the hook
+ * classes: {@link BelfiusHooks} installs and maintains the hooks, {@link Hooks} wraps the
+ * framework's hook plumbing, {@link ModuleLog} owns the diagnostics switch.
+ */
 /** @noinspection unused*/
-public class BelfiusRoot implements IXposedHookLoadPackage {
-    private static final String BELFIUS_PKG = "be.belfius.directmobile.android";
-    private static final Boolean HAS_ROOT = false;
+public class BelfiusRoot extends XposedModule {
+    static final String BELFIUS_PKG = "be.belfius.directmobile.android";
 
-    private static final String[] CLASS_NAMES = new String[] {
-            "o.bsN",
-            "o.bsS",
-            "be.belfius.android.widget.security.security.utils.RootUtils$isDeviceRooted$2",
-            "be.belfius.android.security.utils.RootUtils$isDeviceRooted$2"
-    };
+    /**
+     * Captured at module load: the one-off verdict is emitted only in the app's main process, and
+     * {@link XposedModuleInterface.PackageLoadedParam} no longer carries the process name.
+     */
+    private String processName;
 
-    private static final String[] METHOD_NAMES = new String[] {
-            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-            "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"
-    };
+    private final BelfiusHooks hooks = new BelfiusHooks();
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
-        if (!BELFIUS_PKG.equals(loadPackageParam.packageName)) return;
+    public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
+        processName = param.getProcessName();
+        ModuleLog.attach(this);
+        Hooks.attach(this);
+        logAlways("modern module loaded: process=" + param.getProcessName()
+                + " framework=" + getFrameworkName() + " " + getFrameworkVersion()
+                + " api=" + getApiVersion());
+        DEBUG = readDebugPref();
+    }
 
-        // Loop through all possible class + method names, to attempt to find the method to hook
-        for (String className : CLASS_NAMES) {
-            for (String methodName : METHOD_NAMES) {
-                try {
-                    // Initialize method name string helper for logging
-                    String methodNameStr = className + "." + methodName + "()";
+    @Override
+    public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
+        if (!BELFIUS_PKG.equals(param.getPackageName())) return;
 
-                    // Attempt to hook the method
-                    XposedHelpers.findAndHookMethod(
-                            className,
-                            loadPackageParam.classLoader,
-                            methodName,
-                            new XC_MethodHook() {
-                                @Override
-                                protected void afterHookedMethod(MethodHookParam param) {
-                                    param.setResult(HAS_ROOT);
-                                }
-                            });
+        ClassLoader classLoader = param.getDefaultClassLoader();
+        DEBUG = readDebugPref();
+        IsolatedScannerBypass.readSetting();
+        ModuleLog.log("handleLoadPackage for " + BELFIUS_PKG + " loader=" + classLoader);
+        try {
+            ModuleLog.log("   appInfo=" + param.getApplicationInfo());
+        } catch (Throwable ignored) {}
 
-                    // Log success + abort loops
-                    log("Successfully hooked " + methodNameStr + "!");
-                    return;
-
-                } catch (Throwable ignored) {}
-            }
-        }
-
-        log("Failed to hook, no viable method found...");
+        hooks.install(classLoader, processName);
     }
 }

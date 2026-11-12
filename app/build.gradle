@@ -4,14 +4,21 @@ plugins {
 
 android {
     namespace 'be.belfius.directmobile.android.root'
-    compileSdk 34
+    // 37 is required by io.github.libxposed:service/interface:102.0.0 (minCompileSdk=37).
+    // compileSdk only decides which APIs we can compile against; minSdk/targetSdk below
+    // decide where the module can be installed and how it behaves at runtime, so this does
+    // not affect the Android 13 (API 33) devices the module must keep working on.
+    compileSdk 37
 
     defaultConfig {
         applicationId "be.belfius.directmobile.android.root"
-        minSdk 24
+        // 26 is the minSdk of the libxposed service library (io.github.libxposed:service).
+        // Keep this at 26: the module's owner runs Android 13 (API 33) and a newer minSdk
+        // would make the module uninstallable there.
+        minSdk 26
         targetSdk 34
-        versionCode 112
-        versionName "1.1.2"
+        versionCode 113
+        versionName "1.2.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -35,5 +42,14 @@ dependencies {
     testImplementation libs.junit
     androidTestImplementation libs.ext.junit
     androidTestImplementation libs.espresso.core
-    compileOnly 'de.robv.android.xposed:api:82'
+
+    // Modern Xposed API (libxposed API 102). compileOnly: the framework provides these classes at
+    // runtime inside the hooked process, they must not be packaged into the module's dex.
+    compileOnly 'io.github.libxposed:api:102.0.0'
+    compileOnly 'io.github.libxposed:annotation:1.0.0'
+
+    // Xposed service: used by the module app itself (SettingsActivity / DebugToggleReceiver) to
+    // talk to the framework and write remote preferences. Bundled, because the module app is not
+    // hooked and therefore cannot use XposedInterface.getRemotePreferences() to write.
+    implementation 'io.github.libxposed:service:102.0.0'
 }

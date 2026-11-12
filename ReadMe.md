@@ -46,6 +46,8 @@ Hope you'll enjoy this module and the ability to stay rooted!
 When the Belfius app updates,   
 there's a chance that the hooks of the Belfius-Root app break.
 
+For detailed compatibility (working/unsupported versions, version codes, minimum version enforced by Belfius, etc.), see [SupportedVersions.md](SupportedVersions.md).
+
 To prevent this from happening, it's recommended to:
 - Disable auto updating of the Belfius app
 - First update the Belfius-Root app (reboot afterwards)
@@ -58,7 +60,7 @@ then you can still downgrade through [Aurora Store](https://gitlab.com/AuroraOSS
 To downgrade, simply:
 1. Search Belfius app in Aurora Store
 2. Triple dot icon => Manual Download
-3. Enter version code of the desired Belfius app version (Can be found under the [Belfius-Root releases](https://github.com/Rikj000/Belfius-Root/releases))
+3. Enter version code of the desired Belfius app version (see [SupportedVersions.md](SupportedVersions.md) for version codes)
 4. Click check and the download should start.
 
 ## LSPosed Archived
@@ -71,4 +73,4 @@ which helps keep track of the status of upcoming successor forks:
 https://github.com/Rikj000/Android-Auto-XLauncher-Unlocked/issues/6
 
 Android 15 users require these since official LSPosed only supports up to Android 14.   
-`@arnii5` reported good results [on XDA](https://xdaforums.com/t/release-v1-0-1-belfius-root.4680025/#post-89782267) with [JingMatrix/LSPosed](https://github.com/JingMatrix/LSPosed) on Android 15.
+`@arnii5` reported good results [on XDA](https://xdaforums.com/t/release-v1-0-1-belfius-root.4680025/#post-89782267) with [JingMatrix/Vector](https://github.com/JingMatrix/Vector) on Android 15.

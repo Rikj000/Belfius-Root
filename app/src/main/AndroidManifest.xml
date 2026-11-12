@@ -2,9 +2,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!--
+      Modern (libxposed API 102) module. There is no xposedmodule / xposeddescription /
+      xposedminversion / xposedsharedprefs metadata any more: the module is recognised by
+      META-INF/xposed/java_init.list + META-INF/xposed/module.prop, its name comes from
+      android:label and its description from android:description.
+    -->
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:description="@string/app_description"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -13,18 +20,29 @@
         android:theme="@style/Theme.BelfiusRoot"
         tools:targetApi="31">
 
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="Support Belfius app on Rooted devices! Module by Rikj000" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="54" />
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@array/xposedscope" />
+        <!-- App entry point: About (default) + Settings behind an icon-only bottom navigation.
+             Also the way to open the module from its launcher icon. The values live in the
+             framework's remote preferences. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/settings_title">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Scripted toggles: see agentic_dev/scripts/reload-and-test.sh
+             (am broadcast ...SET_DEBUG / ...SET_SCANNER). -->
+        <receiver
+            android:name=".DebugToggleReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="be.belfius.directmobile.android.root.SET_DEBUG" />
+                <action android:name="be.belfius.directmobile.android.root.SET_SCANNER" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>
