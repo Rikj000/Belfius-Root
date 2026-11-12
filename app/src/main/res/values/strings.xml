@@ -1,11 +1,30 @@
 <resources>
     <string name="app_name">Belfius Root</string>
-    <string name="app_description">Support the Belfius app on rooted devices. Modern (libxposed) module.</string>
+    <string name="app_description">Support the Belfius app on rooted devices. Modern libxposed module.</string>
     <string name="settings_title">Belfius Root</string>
     <string name="settings_debug_title">Debug logging</string>
-    <string name="settings_debug_summary">Print the module\'s diagnostics to logcat: guard values, audit tokens and stack traces, plus extra sanity checks on the UI layout path. Off by default — the diagnostics run inside the packer\'s audit, which the app executes on the main thread on some screens, so leaving this on can make navigation feel slow.</string>
+    <string name="settings_debug_summary">Print the module\'s diagnostics to logcat: guard values, audit tokens and stack traces.</string>
+    <string name="settings_debug_note">Off by default — development only, will impact app performance.</string>
     <string name="settings_scanner_title">Isolated scanner disarm (v26.3.0+)</string>
-    <string name="settings_scanner_summary">Belfius v26.3.0 added a second, isolated process (service o.cDe) that runs under a one-off UID, outside your root manager\'s hiding, and reports the device as rooted. With this on, the module never lets that service start. This switch is additive: the detection targets, the packer/RASP fixes and the \"Rooted: false\" override all stay installed, because they guard a different check (the app\'s in-process audit of our own hooks) that the isolated process never sees. Off (the default) is exactly the bypass this module has always shipped. v25.x and v26.1.0 ship no isolated scanner and are unaffected either way.</string>
-    <string name="settings_restart_hint">Takes effect the next time the Belfius app starts. From a shell you can also flip them with:\nadb shell am broadcast -a be.belfius.directmobile.android.root.SET_DEBUG --ez debug true\nadb shell am broadcast -a be.belfius.directmobile.android.root.SET_SCANNER --ez scanner true</string>
+    <string name="settings_scanner_summary">Blocks the second, isolated scanner process that Belfius v26.3.0+ starts outside your root manager\'s hiding.</string>
+    <string name="settings_scanner_note">Off by default — normally only needed by Magisk-only users without LSPosed. Enable as an experiment if still being detected as rooted.</string>
+    <string name="settings_restart_note">Takes effect the next time the Belfius app starts.</string>
+    <string name="settings_restart_info">More information</string>
+    <string name="settings_restart_dialog_title">When does this apply?</string>
+    <string name="settings_restart_dialog_message">Takes effect the next time the Belfius app starts.\n\nFrom a shell you can also flip them with:\n\nadb shell am broadcast -a be.belfius.directmobile.android.root.SET_DEBUG --ez debug true\nadb shell am broadcast -a be.belfius.directmobile.android.root.SET_SCANNER --ez scanner true</string>
     <string name="settings_service_unreachable">Could not reach the Xposed framework service. Make sure the module is enabled and scoped in Vector, then reopen this screen. The value on screen may be stale.</string>
+    <string name="settings_theme_title">Theme</string>
+    <string name="theme_system">System (dark/light)</string>
+    <string name="theme_dark">Dark</string>
+    <string name="theme_light">Light</string>
+    <string name="nav_about">About</string>
+    <string name="nav_settings">Settings</string>
+    <string name="about_version">Version %1$s</string>
+    <string name="about_author">Rikj000</string>
+    <string name="about_link_github">GitHub repository</string>
+    <string name="about_link_xda">XDA thread</string>
+    <string name="about_framework">Framework service</string>
+    <string name="about_api">LibXposed api: version %1$d</string>
+    <string name="about_status_checking">Checking…</string>
+    <string name="about_status_unreachable">Not reachable — enable the module and scope it to the Belfius app in Vector, then reopen this screen.</string>
 </resources>

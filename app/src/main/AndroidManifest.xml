@@ -20,10 +20,11 @@
         android:theme="@style/Theme.BelfiusRoot"
         tools:targetApi="31">
 
-        <!-- Settings screen (diagnostics + isolated-scanner switches). Also the way to open the
-             module from its launcher icon. The values live in the framework's remote preferences. -->
+        <!-- App entry point: About (default) + Settings behind an icon-only bottom navigation.
+             Also the way to open the module from its launcher icon. The values live in the
+             framework's remote preferences. -->
         <activity
-            android:name=".SettingsActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:label="@string/settings_title">
             <intent-filter>

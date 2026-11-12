@@ -28,7 +28,7 @@ public final class ModuleSettings {
     public static final String ACTION_SET_SCANNER = MODULE_PKG + ".SET_SCANNER";
     /** Remote preferences group. */
     public static final String PREFS = "settings";
-    /** Emit the module's diagnostics to logcat. Off by default — see SettingsActivity. */
+    /** Emit the module's diagnostics to logcat. Off by default — see MainActivity. */
     public static final String KEY_DEBUG = "debug";
     /**
      * Add the isolated-scanner disarm on top of the per-method bypass. Off by default: off is the
@@ -91,6 +91,30 @@ public final class ModuleSettings {
         XposedService s = awaitService();
         if (s == null) return null;
         return s.getRemotePreferences(PREFS).getBoolean(key, false);
+    }
+
+    /**
+     * Identity of the framework this app is talking to, or {@code null} when the service is
+     * unreachable (module disabled, not scoped, or simply not bound yet). Used by the About screen;
+     * blocks like {@link #read(String)} do.
+     */
+    public static Framework framework() throws InterruptedException {
+        XposedService s = awaitService();
+        if (s == null) return null;
+        return new Framework(s.getFrameworkName(), s.getFrameworkVersion(), s.getApiVersion());
+    }
+
+    /** As the service reports it: {@code name} + {@code version} identify the framework build. */
+    public static final class Framework {
+        public final String name;
+        public final String version;
+        public final int apiVersion;
+
+        Framework(String name, String version, int apiVersion) {
+            this.name = name;
+            this.version = version;
+            this.apiVersion = apiVersion;
+        }
     }
 
     /**

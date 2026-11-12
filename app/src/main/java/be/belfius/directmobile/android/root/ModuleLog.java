@@ -20,7 +20,7 @@ final class ModuleLog {
 
     /**
      * Diagnostics switch, read once per process from the module's "debug" setting
-     * (see {@link ModuleSettings} and {@link SettingsActivity}).
+     * (see {@link ModuleSettings} and {@link MainActivity}).
      *
      * <p>Off by default: the diagnostics run inside the packer's audit, which executes on the main
      * thread on some screens, so leaving them on makes navigation feel slow. Gating here only
